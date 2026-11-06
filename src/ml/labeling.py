@@ -5,7 +5,7 @@
 import numpy as np
 import pandas as pd
 
-from src.ml.features import PHONE_FEATURES
+from src.ml.features import PHONE_FEATURES, effective_refresh
 
 CLASS_NAMES = {0: "Бюджетный", 1: "Средний", 2: "Флагман"}
 
@@ -53,8 +53,11 @@ _IDX = {f: i for i, f in enumerate(PHONE_FEATURES)}
 def phone_labels(df: pd.DataFrame) -> np.ndarray:
     """Метка класса по взвешенному скорингу перцентилей характеристик."""
     rank = lambda c: df[c].rank(pct=True).to_numpy()
+    # для частоты экрана не ранг, а шкала эффективной частоты: 144+ Гц почти не лучше 120 Гц
+    hz = effective_refresh(df["refresh_hz"])
+    hz_score = (hz - hz.min()) / (hz.max() - hz.min() + 1e-9)
     score = (0.35 * rank("price_rub") + 0.25 * rank("antutu_k") + 0.10 * rank("camera_mp")
-             + 0.10 * rank("ram_gb") + 0.10 * rank("refresh_hz") + 0.05 * rank("charge_w")
+             + 0.10 * rank("ram_gb") + 0.10 * hz_score + 0.05 * rank("charge_w")
              + 0.05 * rank("year"))
     lo, hi = np.quantile(score, [0.40, 0.72])
     return np.digitize(score, [lo, hi]).astype(int)

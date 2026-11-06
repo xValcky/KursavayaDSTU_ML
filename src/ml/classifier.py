@@ -20,7 +20,7 @@ from src.preprocess import split_train_val_test
 
 MODEL_PATH = MODELS_DIR / "pipeline.joblib"
 # меняется при изменении признаков/анкеты: старые сохранённые модели не загружаются
-MODEL_VERSION = 3
+MODEL_VERSION = 4
 
 
 class PhonePipeline:

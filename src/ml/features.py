@@ -31,6 +31,17 @@ EXPERT_WEIGHTS = {
     "active_h": 0.9, "standby_d": 0.6,
 }
 
+# Частота экрана: до 120 Гц каждый герц идёт с коэффициентом 1, выше — только 0.2.
+# Разница 120 → 144/165/185 Гц на практике почти незаметна, это в основном маркетинг.
+HZ_KNEE, HZ_ABOVE_KNEE = 120, 0.2
+
+
+def effective_refresh(hz):
+    """Эффективная частота: min(hz, 120) + 0.2 · (hz − 120) для частот выше 120 Гц."""
+    hz = np.asarray(hz, dtype=float)
+    return np.minimum(hz, HZ_KNEE) + HZ_ABOVE_KNEE * np.maximum(hz - HZ_KNEE, 0)
+
+
 # Признаки, к которым применяется логарифм (сильно скошенные распределения).
 LOG_FEATURES = ["price_rub", "ram_gb", "rom_gb", "battery_mah", "antutu_k", "charge_w", "weight_g"]
 
@@ -38,6 +49,7 @@ LOG_FEATURES = ["price_rub", "ram_gb", "rom_gb", "battery_mah", "antutu_k", "cha
 def phone_matrix(df: pd.DataFrame) -> np.ndarray:
     data = df.copy()
     data["is_ios"] = (data["os"] == "iOS").astype(float)
+    data["refresh_hz"] = effective_refresh(data["refresh_hz"])
     for c in LOG_FEATURES:
         data[c] = np.log1p(data[c].astype(float))
     return data[PHONE_FEATURES].to_numpy(dtype=np.float64)

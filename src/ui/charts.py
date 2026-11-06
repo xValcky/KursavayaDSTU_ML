@@ -8,6 +8,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Ellipse
 from scipy.cluster.hierarchy import dendrogram
 
+from src.ml.features import effective_refresh
 from src.ml.labeling import CLASS_NAMES
 from src.ml.recommender import full_name
 
@@ -52,14 +53,23 @@ class MplCanvas(FigureCanvasQTAgg):
         self.draw_idle()
 
 
-def _percentile_profile(pipe) -> pd.DataFrame:
-    """Средний перцентиль признака по кластеру (0..1): удобно сравнивать разные единицы."""
-    df = pipe.phones_
+def _feature_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """Признаки в шкале 0..1: перцентиль в базе; для частоты экрана — шкала эффективной частоты
+    (выше 120 Гц с коэффициентом 0.2), чтобы 144+ Гц не выглядели намного лучше 120 Гц."""
     data = {}
     for col, title, invert in PROFILE_FEATURES:
-        r = df[col].rank(pct=True)
+        if col == "refresh_hz":
+            hz = pd.Series(effective_refresh(df[col]), index=df.index)
+            r = (hz - hz.min()) / (hz.max() - hz.min() + 1e-9)
+        else:
+            r = df[col].rank(pct=True)
         data[title] = 1 - r if invert else r
-    return pd.DataFrame(data).groupby(pipe.clusters_).mean()
+    return pd.DataFrame(data)
+
+
+def _percentile_profile(pipe) -> pd.DataFrame:
+    """Средний перцентиль признака по кластеру (0..1): удобно сравнивать разные единицы."""
+    return _feature_scores(pipe.phones_).groupby(pipe.clusters_).mean()
 
 
 def _radar_axes(canvas, n):
@@ -98,8 +108,7 @@ def plot_reco_radar(canvas: MplCanvas, pipe, phone_ids, top=3, title="Топ-3: 
     df = pipe.phones_
     labels = [t for _, t, _ in PROFILE_FEATURES]
     ax, angles = _radar_axes(canvas, len(labels))
-    ranks = pd.DataFrame({t: (1 - df[c].rank(pct=True)) if inv else df[c].rank(pct=True)
-                          for c, t, inv in PROFILE_FEATURES})
+    ranks = _feature_scores(df)
     for k, pid in enumerate(phone_ids[:top]):
         i = int(np.flatnonzero(df["id"].to_numpy() == pid)[0])
         v = ranks.iloc[i].to_numpy()
