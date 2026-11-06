@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Сборка exe (собирается командой: python build_exe.py)
+build/
+dist/
+
+# Генерируется при запуске: база с анкетами/отзывами, обученные модели, ключи
+data/phones.db
+models/
+PhonePicker_data/
+.env
