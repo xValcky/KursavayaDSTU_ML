@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
                                QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QTabWidget,
                                QTextEdit, QVBoxLayout, QWidget)
@@ -20,6 +20,7 @@ from src.ml.price_model import PriceModel
 from src.ml.recommender import explain, full_name, phone_row, recommend
 from src.providers.base import ENV_PATH, ProviderError, all_providers
 from src.ui import charts
+from src.ui.style import build_palette, build_qss
 from src.ui.widgets import (DUEL_ROWS, DuelWidget, GuessGame, PandasModel, PhoneCard, SandboxWidget, SimilarDialog,
                             Task, clear_layout, hint, make_table, page, pool, selected_id, split)
 
@@ -71,16 +72,37 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_data_tab(), "Данные и API")
         self.tabs.currentChanged.connect(lambda i: self.refresh_favorites() if i == TAB_FAV else None)
 
-        self.pro = QCheckBox("Про-режим")
-        self.pro.setObjectName("switch")
-        self.pro.setCursor(Qt.PointingHandCursor)
-        self.pro.setToolTip("Для опытных: все параметры, аналитика модели, дуэль, игра и песочница")
-        self.pro.toggled.connect(self.set_mode)
+        # переключатель режима: сегмент «Простой | Про» + кнопка темы
         corner = QWidget()
         cl = QHBoxLayout(corner)
-        cl.setContentsMargins(0, 0, 12, 0)
-        cl.addWidget(self.pro)
+        cl.setContentsMargins(0, 2, 12, 2)
+        cl.setSpacing(8)
+        segment = QFrame()
+        segment.setObjectName("segment")
+        sg = QHBoxLayout(segment)
+        sg.setContentsMargins(3, 3, 3, 3)
+        sg.setSpacing(2)
+        self.mode_group = QButtonGroup(self)
+        self.btn_simple = QPushButton("Простой")
+        self.btn_pro = QPushButton("Про")
+        for b, tip in ((self.btn_simple, "Для новичка: пресеты, бюджет, 4 ползунка, карточки"),
+                       (self.btn_pro, "Для опытных: все параметры, аналитика модели, дуэль, игра и песочница")):
+            b.setObjectName("segBtn")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(tip)
+            self.mode_group.addButton(b)
+            sg.addWidget(b)
+        self.btn_pro.toggled.connect(self.set_mode)
+        self.btn_theme = QPushButton()
+        self.btn_theme.setObjectName("themeBtn")
+        self.btn_theme.setCursor(Qt.PointingHandCursor)
+        self.btn_theme.clicked.connect(self.toggle_theme)
+        cl.addWidget(segment)
+        cl.addWidget(self.btn_theme)
         self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
+        self.theme = self.settings.value("theme", "light")
+        self.apply_theme(self.theme, rerender=False)
 
         db.init_db()
         self.reload_phones()
@@ -92,8 +114,9 @@ class MainWindow(QMainWindow):
         self.refresh_catalog()
         self.refresh_db_stats()
         self.reload_profiles()
-        self.pro.setChecked(self.settings.value("pro_mode", False, type=bool))
-        self.set_mode(self.pro.isChecked())
+        pro = self.settings.value("pro_mode", False, type=bool)
+        (self.btn_pro if pro else self.btn_simple).setChecked(True)
+        self.set_mode(pro)
         self.pipe = PhonePipeline.load()
         if self.pipe is None or len(self.pipe.phones_) != len(self.phones):
             self.retrain()
@@ -104,6 +127,26 @@ class MainWindow(QMainWindow):
     def reload_phones(self):
         self.phones_all = db.get_phones(include_archived=True)
         self.phones = self.phones_all[self.phones_all["archived"].fillna(0) == 0]
+
+    # ===== Тема =====
+    def apply_theme(self, theme: str, rerender: bool = True):
+        self.theme = theme
+        self.settings.setValue("theme", theme)
+        charts.set_theme(theme)
+        app = QApplication.instance()
+        app.setPalette(build_palette(theme))
+        app.setStyleSheet(build_qss(theme))
+        self.btn_theme.setText("☀  Светлая" if theme == "dark" else "☾  Тёмная")
+        self.btn_theme.setToolTip("Переключить тему оформления")
+        if rerender and self.pipe is not None:
+            self.refresh_analytics()
+            self.refresh_aux()
+            self.duel.refresh()
+            if self.last_res:
+                self.render_results()
+
+    def toggle_theme(self):
+        self.apply_theme("light" if self.theme == "dark" else "dark")
 
     # ===== Режимы =====
     def set_mode(self, pro: bool):

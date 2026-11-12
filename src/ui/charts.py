@@ -15,19 +15,36 @@ from src.ml.recommender import full_name
 PALETTE = ["#5B7FDB", "#F2A65A", "#5DB58A", "#E07A7A", "#9C82D4", "#4FB3BF", "#D9B44A", "#A0806B",
            "#3D5A99", "#C97B2E", "#3F8A63", "#B85454", "#7660B0", "#2E8A94", "#A88A24", "#6E5444"]
 CLASS_COLORS = ["#8FBF9F", "#7FA6E0", "#C99BD9"]
-TEXT, MUTED, GRID = "#2E3440", "#7A8194", "#ECEEF3"
-SOFT_BLUES = LinearSegmentedColormap.from_list("soft", ["#FFFFFF", "#DCE5FA", "#5B7FDB"])
-SOFT_DIVERGING = LinearSegmentedColormap.from_list("div", ["#E07A7A", "#FFFFFF", "#5B7FDB"])
+# Цвета графиков под тему; меняются функцией set_theme (функции читают их при каждом рисовании)
+CHART_THEMES = {
+    "light": {"TEXT": "#2E3440", "MUTED": "#7A8194", "GRID": "#ECEEF3", "CARD_BG": "#FFFFFF",
+              "EDGE": "#D5D9E2", "NEUTRAL": "#C5CBD8", "SOFT_MID": "#DCE5FA"},
+    "dark": {"TEXT": "#E6E8EE", "MUTED": "#9AA2B5", "GRID": "#2C313B", "CARD_BG": "#1E2128",
+             "EDGE": "#3A404C", "NEUTRAL": "#4A5161", "SOFT_MID": "#33406A"},
+}
+TEXT = MUTED = GRID = CARD_BG = EDGE = NEUTRAL = None
+SOFT_BLUES = SOFT_DIVERGING = None
 
-mpl.rcParams.update({
-    "font.family": ["Segoe UI", "DejaVu Sans"], "font.size": 9,
-    "axes.edgecolor": "#D5D9E2", "axes.labelcolor": MUTED, "axes.titlecolor": TEXT,
-    "axes.titlesize": 11, "axes.titleweight": "semibold", "axes.titlepad": 10,
-    "axes.spines.top": False, "axes.spines.right": False,
-    "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.8,
-    "xtick.color": MUTED, "ytick.color": MUTED, "legend.frameon": False,
-    "figure.facecolor": "white", "axes.facecolor": "white",
-})
+
+def set_theme(theme: str = "light"):
+    global TEXT, MUTED, GRID, CARD_BG, EDGE, NEUTRAL, SOFT_BLUES, SOFT_DIVERGING
+    c = CHART_THEMES.get(theme, CHART_THEMES["light"])
+    TEXT, MUTED, GRID, CARD_BG, EDGE, NEUTRAL = (c[k] for k in ("TEXT", "MUTED", "GRID", "CARD_BG", "EDGE", "NEUTRAL"))
+    SOFT_BLUES = LinearSegmentedColormap.from_list("soft", [CARD_BG, c["SOFT_MID"], "#5B7FDB"])
+    SOFT_DIVERGING = LinearSegmentedColormap.from_list("div", ["#E07A7A", CARD_BG, "#5B7FDB"])
+    mpl.rcParams.update({
+        "font.family": ["Segoe UI", "DejaVu Sans"], "font.size": 9,
+        "axes.edgecolor": EDGE, "axes.labelcolor": MUTED, "axes.titlecolor": TEXT,
+        "axes.titlesize": 11, "axes.titleweight": "semibold", "axes.titlepad": 10,
+        "axes.spines.top": False, "axes.spines.right": False,
+        "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.8,
+        "xtick.color": MUTED, "ytick.color": MUTED, "legend.frameon": False,
+        "figure.facecolor": CARD_BG, "axes.facecolor": CARD_BG, "savefig.facecolor": CARD_BG,
+        "text.color": TEXT, "legend.labelcolor": TEXT,
+    })
+
+
+set_theme("light")
 
 # Признаки для профилей кластеров: (столбец, подпись, инвертировать?)
 PROFILE_FEATURES = [("price_rub", "Цена", False), ("antutu_k", "Мощность", False),
@@ -48,6 +65,7 @@ class MplCanvas(FigureCanvasQTAgg):
 
     def clear(self, nrows=1, ncols=1, **kw):
         self.fig.clear()
+        self.fig.set_facecolor(mpl.rcParams["figure.facecolor"])
         return self.fig.subplots(nrows, ncols, **kw)
 
     def done(self):
@@ -91,7 +109,7 @@ def plot_proba(canvas: MplCanvas, proba):
     ax = canvas.clear()
     names = [CLASS_NAMES[i] for i in range(3)]
     best = int(np.argmax(proba))
-    colors = [CLASS_COLORS[i] if i == best else "#E4E7EE" for i in range(3)]
+    colors = [CLASS_COLORS[i] if i == best else NEUTRAL for i in range(3)]
     bars = ax.barh(names, proba, color=colors, height=0.55)
     for b, p in zip(bars, proba):
         ax.text(p + 0.02, b.get_y() + b.get_height() / 2, f"{p:.0%}", va="center", color=TEXT)
@@ -161,13 +179,13 @@ def plot_clusters(canvas: MplCanvas, pipe, highlight_ids=(), compact=False):
             m = in_c & (pipe.labels_ == lab)
             if m.any():
                 ax.scatter(xy[m, 0], xy[m, 1], s=34, c=col, marker=markers[lab], alpha=0.85,
-                           edgecolor="white", linewidth=0.6)
+                           edgecolor=CARD_BG, linewidth=0.6)
         ax.scatter(*centers[c], s=180, marker="X", c=col, edgecolor=TEXT, linewidth=1, zorder=5)
         if not compact:
             short = pipe.cluster_names_[c].split(" · ")[-1]
             ax.annotate(f"{short} ({in_c.sum()})", centers[c], xytext=(8, 8),
                         textcoords="offset points", fontsize=7, color=TEXT,
-                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=col, alpha=0.9))
+                        bbox=dict(boxstyle="round,pad=0.3", fc=CARD_BG, ec=col, alpha=0.9))
     if len(highlight_ids):
         m = np.isin(pipe.phones_["id"].to_numpy(), list(highlight_ids))
         ax.scatter(xy[m, 0], xy[m, 1], s=150, facecolors="none", edgecolors="#E07A7A", linewidth=2,
@@ -218,7 +236,7 @@ def plot_price_perf(canvas: MplCanvas, pipe):
     for c in range(pipe.k_):
         m = pipe.clusters_ == c
         ax.scatter(df["price_rub"][m] / 1000, df["antutu_k"][m], s=sizes[m], c=cluster_color(c), alpha=0.7,
-                   edgecolor="white", linewidth=0.6, label=pipe.cluster_names_[c])
+                   edgecolor=CARD_BG, linewidth=0.6, label=pipe.cluster_names_[c])
     # линия «цена/производительность» — тренд по всей базе (лог-регрессия)
     x = np.log(df["price_rub"] / 1000)
     a, b = np.polyfit(x, df["antutu_k"], 1)
@@ -332,7 +350,7 @@ def plot_dendrogram(canvas: MplCanvas, link, labels):
     from scipy.cluster import hierarchy
     hierarchy.set_link_color_palette(PALETTE)
     dendrogram(link, labels=labels, ax=ax, leaf_font_size=5, leaf_rotation=90,
-               above_threshold_color="#C5CBD8")
+               above_threshold_color=NEUTRAL)
     ax.grid(False)
     ax.set_ylabel("Евклидово расстояние")
     ax.set_title("Иерархическая кластеризация (complete linkage)")
@@ -375,7 +393,7 @@ def plot_ablation(canvas: MplCanvas, df):
     ax = canvas.clear()
     pivot = df.pivot(index="модель", columns="вариант", values="accuracy").sort_values("с кластеризацией")
     y = np.arange(len(pivot))
-    ax.barh(y - 0.2, pivot["без кластеризации"], height=0.38, label="без кластеризации", color="#C5CBD8")
+    ax.barh(y - 0.2, pivot["без кластеризации"], height=0.38, label="без кластеризации", color=NEUTRAL)
     ax.barh(y + 0.2, pivot["с кластеризацией"], height=0.38, label="с кластеризацией", color=PALETTE[0])
     for i, (a, b) in enumerate(zip(pivot["без кластеризации"], pivot["с кластеризацией"])):
         d = b - a
@@ -393,7 +411,7 @@ def plot_ablation(canvas: MplCanvas, df):
 def plot_weights(canvas: MplCanvas, table):
     ax = canvas.clear()
     t = table.sort_values("вес")
-    colors = [PALETTE[0] if w >= 1 else "#C5CBD8" for w in t["вес"]]
+    colors = [PALETTE[0] if w >= 1 else NEUTRAL for w in t["вес"]]
     ax.barh(t["признак"], t["вес"], color=colors, height=0.6)
     ax.axvline(1.0, color=MUTED, ls="--", lw=1)
     ax.grid(axis="y", visible=False)
@@ -487,7 +505,7 @@ def plot_regression(canvas: MplCanvas, pm):
     a3.legend(fontsize=7)
     r = pm.results_.sort_values("MAE, %")
     a4.barh(r["метод"][::-1], r["MAE, %"][::-1],
-            color=[PALETTE[0] if m == pm.best_name_ else "#C5CBD8" for m in r["метод"][::-1]])
+            color=[PALETTE[0] if m == pm.best_name_ else NEUTRAL for m in r["метод"][::-1]])
     a4.set_xlabel("Средняя ошибка, %")
     a4.set_title("Сравнение методов (MAE, %)", fontsize=9)
     a4.tick_params(axis="y", labelsize=7)

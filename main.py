@@ -9,11 +9,11 @@ from src.paths import ensure_runtime_files
 def main():
     ensure_runtime_files()
     from src.ui.main_window import MainWindow
-    from src.ui.style import QSS
+    from src.ui.style import build_qss
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(build_qss("light"))  # окно само применит сохранённую тему
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
