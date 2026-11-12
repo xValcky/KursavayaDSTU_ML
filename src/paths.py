@@ -42,15 +42,18 @@ def ensure_runtime_files() -> None:
     """Первый запуск exe: скопировать встроенные БД, датасет и обученные модели."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    seeds = ("phones_seed.csv", "price_history_seed.csv")  # датасеты только читаются — всегда свежие
     if not FROZEN:
-        source_seed = SOURCE_ROOT / "data" / "phones_seed.csv"
-        if DATA_DIR != source_seed.parent:
-            shutil.copy2(source_seed, DATA_DIR / "phones_seed.csv")
+        if DATA_DIR != SOURCE_ROOT / "data":
+            for name in seeds:
+                if (SOURCE_ROOT / "data" / name).exists():
+                    shutil.copy2(SOURCE_ROOT / "data" / name, DATA_DIR / name)
         return
-    for rel in ("data/phones_seed.csv", "data/phones.db", "models/pipeline.joblib",
-                "models/experiments.joblib", ".env.example"):
+    for rel in ("data/phones.db", "models/pipeline.joblib", "models/experiments.joblib",
+                "models/price_model.joblib", ".env.example"):
         src, dst = BUNDLE_DIR / rel, APP_DIR / rel
         if src.exists() and not dst.exists():
             shutil.copy2(src, dst)
-    # датасет всегда берём свежий из сборки (он только читается)
-    shutil.copy2(BUNDLE_DIR / "data/phones_seed.csv", DATA_DIR / "phones_seed.csv")
+    for name in seeds:
+        if (BUNDLE_DIR / "data" / name).exists():
+            shutil.copy2(BUNDLE_DIR / "data" / name, DATA_DIR / name)

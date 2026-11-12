@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
 from sklearn.cluster import DBSCAN, AgglomerativeClustering, KMeans
-from sklearn.metrics import davies_bouldin_score, silhouette_samples, silhouette_score
+from sklearn.metrics import adjusted_rand_score, davies_bouldin_score, silhouette_samples, silhouette_score
 
 from src.ml.features import PHONE_FEATURES
 
@@ -21,7 +21,7 @@ CLUSTER_WORDS = {
 
 
 def make_kmeans(k: int) -> KMeans:
-    return KMeans(n_clusters=k, init="k-means++", n_init=10, max_iter=300, tol=1e-4, random_state=0)
+    return KMeans(n_clusters=k, init="k-means++", n_init=20, max_iter=300, tol=1e-4, random_state=0)
 
 
 def elbow(x: np.ndarray, k_max: int = 10) -> list[float]:
@@ -32,10 +32,32 @@ def silhouette_by_k(x: np.ndarray, k_range=range(2, 11)) -> dict[int, float]:
     return {k: silhouette_score(x, make_kmeans(k).fit_predict(x)) for k in k_range}
 
 
-def choose_k(x: np.ndarray, k_min: int = 4, k_max: int = 7) -> int:
-    """k с лучшим силуэтом среди интерпретируемых значений (не меньше 4 групп)."""
-    scores = silhouette_by_k(x, range(k_min, k_max + 1))
-    return max(scores, key=scores.get)
+TIER_NAMES = {0: "Бюджет", 1: "Средний", 2: "Флагманы"}
+MIN_CLUSTER_SIZE = 8
+
+
+def choose_k(x: np.ndarray, k_min: int = 3, k_max: int = 5, min_size: int = MIN_CLUSTER_SIZE,
+             tolerance: float = 0.04) -> int:
+    """k с лучшим силуэтом в [k_min; k_max] при условии, что самая маленькая группа ≥ min_size.
+
+    Внутри ценового шпиля 80–115 моделей: больше 5 групп — это уже шум (кластеры из 1–3 моделей).
+    """
+    scores = {}
+    for k in range(k_min, min(k_max, len(x) // min_size) + 1):
+        lab = make_kmeans(k).fit_predict(x)
+        if np.bincount(lab).min() >= min_size:
+            scores[k] = silhouette_score(x, lab)
+    if not scores:
+        return max(2, min(k_min, len(x) // min_size))
+    # силуэт на таких объёмах шумный: берём самое детальное разбиение, которое почти не хуже лучшего
+    best = max(scores.values())
+    return max(k for k, s in scores.items() if s >= best - tolerance)
+
+
+def stability(x: np.ndarray, k: int, seeds: int = 10) -> float:
+    """Средний ARI разбиений с разными random_state относительно первого: 1 — всегда одинаково."""
+    labs = [KMeans(n_clusters=k, n_init=10, random_state=s).fit_predict(x) for s in range(seeds)]
+    return float(np.mean([adjusted_rand_score(labs[0], lab) for lab in labs[1:]]))
 
 
 def compare_algorithms(x: np.ndarray, k: int) -> pd.DataFrame:

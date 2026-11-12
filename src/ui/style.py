@@ -120,3 +120,14 @@ QCheckBox#switch::indicator:checked {{ background: {ACCENT}; }}
 QScrollArea {{ border: none; background: transparent; }}
 QDialog {{ background: {BG}; }}
 """
+
+QSS += f"""
+QLabel#chipInfo {{ background: #EEF0F5; color: {MUTED}; border-radius: 8px; padding: 1px 8px; font-size: 8.5pt; }}
+QLabel#chipGood {{ background: #E3F4EA; color: #2E7D4F; border-radius: 8px; padding: 1px 8px; font-size: 8.5pt;
+                  font-weight: 600; }}
+QLabel#chipBad {{ background: #FCE9E9; color: #A94442; border-radius: 8px; padding: 1px 8px; font-size: 8.5pt;
+                 font-weight: 600; }}
+QLabel#blockTitle {{ font-size: 13pt; font-weight: 700; color: {TEXT}; padding-top: 6px; }}
+QFrame#hintBar {{ background: #FFF4E6; border: 1px solid #F2C894; border-radius: 12px; }}
+QFrame#presetInfo {{ background: {ACCENT_SOFT}; border-radius: 12px; }}
+"""

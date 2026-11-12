@@ -1,0 +1,15 @@
+{
+  "_как_заполнять": "Каждый запрос: name — название; preset — один из пресетов приложения (можно пусто); answers — что поменять в анкете (budget_rub, ползунки imp_*, os_pref, need_nfc, esim_pref, ir_pref, screen_pref, min_hz, min_rom, gaming/photo/work); relevant — модели, которые эксперт считает хорошим ответом, с оценкой 3 (идеально), 2 (хорошо), 1 (допустимо). Название модели — как в колонке «Телефон» приложения. Нужно 20–30 запросов. Проверка: python -m src.ml.evaluation",
+  "queries": [
+    {"name": "Игры до 30 000", "preset": "Игры", "answers": {"budget_rub": 30000}, "relevant": {}},
+    {"name": "Игры до 60 000", "preset": "Игры", "answers": {"budget_rub": 60000}, "relevant": {}},
+    {"name": "Фото до 40 000", "preset": "Фото и видео", "answers": {"budget_rub": 40000}, "relevant": {}},
+    {"name": "Фото до 90 000", "preset": "Фото и видео", "answers": {"budget_rub": 90000}, "relevant": {}},
+    {"name": "Кино и соцсети до 25 000", "preset": "Кино и соцсети", "answers": {"budget_rub": 25000}, "relevant": {}},
+    {"name": "Работа до 50 000, eSIM обязательно", "preset": "Работа", "answers": {"budget_rub": 50000, "esim_pref": 2}, "relevant": {}},
+    {"name": "Для родителей до 15 000", "preset": "Для родителей", "answers": {"budget_rub": 15000}, "relevant": {}},
+    {"name": "Такси и курьер до 25 000", "preset": "Такси и курьер", "answers": {"budget_rub": 25000}, "relevant": {}},
+    {"name": "Компактный до 70 000", "preset": "", "answers": {"budget_rub": 70000, "screen_pref": 1, "imp_compact": 9}, "relevant": {}},
+    {"name": "iPhone до 80 000", "preset": "", "answers": {"budget_rub": 80000, "os_pref": 2}, "relevant": {}}
+  ]
+}

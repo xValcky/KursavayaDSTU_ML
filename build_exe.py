@@ -33,6 +33,10 @@ db.init_db()
 print(f"  база: {db.stats()['phones']} телефонов")
 pipe = PhonePipeline().fit(db.get_phones())
 pipe.save()
+from src.ml.price_model import PriceModel
+pm = PriceModel().fit(pipe.phones_)
+pm.save()
+print(f"  справедливая цена: лучший метод — {pm.best_name_}, MAE {pm.results_.iloc[0]['MAE, %']:.1f}%")
 t = pipe.metrics_["test"]
 print(f"  нейросеть: accuracy {t['accuracy']:.3f}, кластеров {pipe.k_}")
 if {run_exp}:
@@ -67,6 +71,7 @@ def main() -> None:
     (BUNDLE / "data").mkdir(parents=True)
     (BUNDLE / "models").mkdir(parents=True)
     shutil.copy2(ROOT / ".env.example", BUNDLE / ".env.example")
+    shutil.copytree(ROOT / "data" / "benchmarks", BUNDLE / "data" / "benchmarks")
     env = {**os.environ, "PHONEPICKER_HOME": str(BUNDLE), "PYTHONIOENCODING": "utf-8"}
     run([sys.executable, "-c", TRAIN_SCRIPT.replace("{run_exp}", str("--no-experiments" not in args))], env)
 

@@ -21,6 +21,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "data" / "sources"
 OUT = ROOT / "data" / "phones_seed.csv"
+HISTORY_OUT = ROOT / "data" / "price_history_seed.csv"
 FRESH_FROM = "2026-09-06"
 EXCLUDED_BRANDS = {"Huawei", "Sony", "Meizu"}
 COLUMNS = ["brand", "model", "os", "year", "price_rub", "ram_gb", "rom_gb", "battery_mah", "screen_in",
@@ -108,8 +109,12 @@ def pick_price(obs: list[tuple[str, int, str]]) -> tuple[int, str] | None:
 def main():
     df, stats = load_specs()
     prices, unmatched = collect_prices(df)
-    updated = 0
+    updated, history = 0, []
     for idx, obs in prices.items():
+        vals = sorted(p for _, p, _ in obs)
+        med = vals[len(vals) // 2]
+        history += [{"model": df.loc[idx, "model"], "date": d, "price_rub": p, "source": f"telegram:{ch}"}
+                    for d, p, ch in obs if 0.55 * med <= p <= 1.8 * med]
         res = pick_price(obs)
         if res:
             df.loc[idx, "price_rub"], df.loc[idx, "price_source"] = res
@@ -120,6 +125,10 @@ def main():
         df[c] = df[c].astype(int)
     assert df["model"].is_unique, df[df["model"].duplicated()]["model"].tolist()
     df.to_csv(OUT, index=False)
+    hist = pd.DataFrame(history).sort_values(["model", "date"])
+    hist = hist.groupby(["model", "date", "source"], as_index=False)["price_rub"].min()  # один день — одна цена
+    hist.to_csv(HISTORY_OUT, index=False)
+    print(f"История цен: {len(hist)} точек по {hist['model'].nunique()} моделям → {HISTORY_OUT.relative_to(ROOT)}")
     print(f"База августа: {stats['base']} моделей; характеристики обновлены у {stats['updated_specs']}, "
           f"добавлено новых {stats['added']}")
     print(f"Цены из Telegram: у {updated} моделей; с августовской оценкой осталось {len(df) - updated}")

@@ -12,7 +12,8 @@ from src.ml.features import effective_refresh
 from src.ml.labeling import CLASS_NAMES
 from src.ml.recommender import full_name
 
-PALETTE = ["#5B7FDB", "#F2A65A", "#5DB58A", "#E07A7A", "#9C82D4", "#4FB3BF", "#D9B44A", "#A0806B"]
+PALETTE = ["#5B7FDB", "#F2A65A", "#5DB58A", "#E07A7A", "#9C82D4", "#4FB3BF", "#D9B44A", "#A0806B",
+           "#3D5A99", "#C97B2E", "#3F8A63", "#B85454", "#7660B0", "#2E8A94", "#A88A24", "#6E5444"]
 CLASS_COLORS = ["#8FBF9F", "#7FA6E0", "#C99BD9"]
 TEXT, MUTED, GRID = "#2E3440", "#7A8194", "#ECEEF3"
 SOFT_BLUES = LinearSegmentedColormap.from_list("soft", ["#FFFFFF", "#DCE5FA", "#5B7FDB"])
@@ -150,7 +151,7 @@ def _confidence_ellipse(ax, pts, color):
 def plot_clusters(canvas: MplCanvas, pipe, highlight_ids=(), compact=False):
     ax = canvas.clear()
     xy = pipe.space_.to_2d(pipe.x_)
-    centers = pipe.space_.to_2d(pipe.kmeans_.cluster_centers_)
+    centers = pipe.space_.to_2d(pipe.centers_)
     markers = ["o", "s", "^"]
     for c in range(pipe.k_):
         col = cluster_color(c)
@@ -163,22 +164,26 @@ def plot_clusters(canvas: MplCanvas, pipe, highlight_ids=(), compact=False):
                            edgecolor="white", linewidth=0.6)
         ax.scatter(*centers[c], s=180, marker="X", c=col, edgecolor=TEXT, linewidth=1, zorder=5)
         if not compact:
-            ax.annotate(f"{pipe.cluster_names_[c]} ({in_c.sum()})", centers[c], xytext=(8, 8),
-                        textcoords="offset points", fontsize=8, color=TEXT,
+            short = pipe.cluster_names_[c].split(" · ")[-1]
+            ax.annotate(f"{short} ({in_c.sum()})", centers[c], xytext=(8, 8),
+                        textcoords="offset points", fontsize=7, color=TEXT,
                         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=col, alpha=0.9))
     if len(highlight_ids):
         m = np.isin(pipe.phones_["id"].to_numpy(), list(highlight_ids))
         ax.scatter(xy[m, 0], xy[m, 1], s=150, facecolors="none", edgecolors="#E07A7A", linewidth=2,
                    label="Ваши рекомендации", zorder=6)
         ax.legend(loc="lower right", fontsize=8)
-    ax.set_title(f"Карта телефонов: {pipe.k_} кластеров KMeans (PCA)   ○ бюджет  □ средний  △ флагман")
+    ax.set_title(f"Карта телефонов: {pipe.k_} групп (KMeans по шпилям + броневики), PCA   "
+                 f"○ бюджет  □ средний  △ флагман")
     ax.set_xlabel("Главная компонента 1")
     ax.set_ylabel("Главная компонента 2")
     canvas.done()
 
 
-def plot_cluster_radar(canvas: MplCanvas, pipe):
+def plot_cluster_radar(canvas: MplCanvas, pipe, top: int = 6):
     prof = _percentile_profile(pipe)
+    biggest = pd.Series(pipe.clusters_).value_counts().index[:top]
+    prof = prof.loc[sorted(biggest)]
     labels = list(prof.columns)
     ax, angles = _radar_axes(canvas, len(labels))
     for c, row in prof.iterrows():
@@ -187,7 +192,7 @@ def plot_cluster_radar(canvas: MplCanvas, pipe):
                 label=pipe.cluster_names_[c])
         ax.fill(angles, v, color=cluster_color(c), alpha=0.08)
     _style_radar(ax, angles, labels)
-    ax.set_title("Профили кластеров")
+    ax.set_title(f"Профили {len(prof)} крупнейших групп")
     ax.legend(loc="center left", bbox_to_anchor=(1.08, 0.5), fontsize=8)
     canvas.done()
 
@@ -405,4 +410,136 @@ def plot_contrib(canvas: MplCanvas, contrib: pd.Series, title: str):
     ax.grid(axis="y", visible=False)
     ax.set_xlabel("вклад в оценку (зелёное — плюс, красное — минус)")
     ax.set_title(title)
+    canvas.done()
+
+
+# ---------- ансамбли (по мотивам ens.py) ----------
+def plot_roc(canvas: MplCanvas, roc: dict):
+    ax = canvas.clear()
+    for k, (name, r) in enumerate(roc.items()):
+        ax.plot(r["fpr"], r["tpr"], lw=2, color=PALETTE[k], label=f"{name} (AUC {r['auc']:.3f})")
+    ax.plot([0, 1], [0, 1], ls="--", color=MUTED, lw=1)
+    ax.set_xlabel("Доля ложных срабатываний (FPR)")
+    ax.set_ylabel("Доля верных срабатываний (TPR)")
+    ax.set_title("Кривые ROC: классы 0/1/2 (micro-average, 3-fold CV)")
+    ax.legend(fontsize=8, loc="lower right")
+    canvas.done()
+
+
+def plot_regions(canvas: MplCanvas, reg: dict):
+    axes = canvas.clear(2, 2, sharex=True, sharey=True).ravel()
+    cmap = LinearSegmentedColormap.from_list("cls", CLASS_COLORS)
+    for ax, (name, Z) in zip(axes, reg["regions"].items()):
+        ax.contourf(reg["xx"], reg["yy"], Z, alpha=0.35, cmap=cmap, levels=[-0.5, 0.5, 1.5, 2.5])
+        for c in range(3):
+            m = reg["y"] == c
+            ax.scatter(reg["X"][m, 0], reg["X"][m, 1], s=6, color=CLASS_COLORS[c], edgecolor="none", alpha=0.7)
+        ax.set_title(name, fontsize=9)
+        ax.grid(False)
+    canvas.fig.suptitle("Границы решений на 2D-проекции анкет (PCA): бюджет / средний / флагман", fontsize=10)
+    canvas.done()
+
+
+def plot_ensemble_error(canvas: MplCanvas, n: int = 11):
+    """Ошибка голосования n независимых классификаторов против ошибки одного (биномиальная модель)."""
+    from math import ceil, comb
+    ax = canvas.clear()
+    eps = np.linspace(0, 1, 101)
+    ens = [sum(comb(n, k) * e ** k * (1 - e) ** (n - k) for k in range(ceil(n / 2), n + 1)) for e in eps]
+    ax.plot(eps, ens, lw=2, color=PALETTE[0], label=f"ошибка ансамбля из {n}")
+    ax.plot(eps, eps, ls="--", lw=2, color=PALETTE[1], label="ошибка одного классификатора")
+    ax.set_xlabel("Ошибка одного классификатора")
+    ax.set_ylabel("Ошибка")
+    ax.set_title("Почему ансамбль лучше: при ошибке < 0,5 голосование её уменьшает")
+    ax.legend()
+    canvas.done()
+
+
+# ---------- регрессия цены ----------
+def plot_regression(canvas: MplCanvas, pm):
+    (a1, a2), (a3, a4) = canvas.clear(2, 2)
+    o = pm.oof_
+    lim = [o["price"].min() / 1000 * 0.9, o["price"].max() / 1000 * 1.05]
+    for col, lab, c in (("fair", f"лучшая: {pm.best_name_}", PALETTE[0]),
+                        ("nonlinear", "нелинейная (curve_fit)", PALETTE[1])):
+        a1.scatter(o["price"] / 1000, o[col] / 1000, s=12, alpha=0.6, color=c, label=lab)
+    a1.plot(lim, lim, ls="--", color=MUTED)
+    a1.set_xlabel("Факт, тыс. ₽")
+    a1.set_ylabel("Прогноз, тыс. ₽")
+    a1.set_title("Факт против прогноза (кросс-валидация)", fontsize=9)
+    a1.legend(fontsize=7)
+    resid = (o["price"] - o["fair"]) / 1000
+    a2.scatter(o["fair"] / 1000, resid, s=12, alpha=0.6, color=PALETTE[0])
+    a2.axhline(0, color=MUTED, ls="--")
+    a2.set_xlabel("Прогноз, тыс. ₽")
+    a2.set_ylabel("Факт − прогноз, тыс. ₽")
+    a2.set_title("Остатки (выше нуля — переплата)", fontsize=9)
+    f = pm.pair_feature_
+    x = np.expm1(o[f]) if f in ("antutu_k", "ram_gb", "rom_gb", "camera_mp") else o[f]
+    order = np.argsort(x.to_numpy())
+    a3.scatter(x, o["price"] / 1000, s=10, alpha=0.5, color=MUTED, label="данные")
+    a3.plot(x.to_numpy()[order], o["pair"].to_numpy()[order] / 1000, color=PALETTE[3], lw=2,
+            label="парная регрессия")
+    a3.set_xscale("log")
+    a3.set_xlabel("AnTuTu, тыс." if f == "antutu_k" else f)
+    a3.set_ylabel("Цена, тыс. ₽")
+    a3.set_title("Парная регрессия по самому связанному признаку", fontsize=9)
+    a3.legend(fontsize=7)
+    r = pm.results_.sort_values("MAE, %")
+    a4.barh(r["метод"][::-1], r["MAE, %"][::-1],
+            color=[PALETTE[0] if m == pm.best_name_ else "#C5CBD8" for m in r["метод"][::-1]])
+    a4.set_xlabel("Средняя ошибка, %")
+    a4.set_title("Сравнение методов (MAE, %)", fontsize=9)
+    a4.tick_params(axis="y", labelsize=7)
+    a4.grid(axis="y", visible=False)
+    canvas.done()
+
+
+def plot_tree(canvas: MplCanvas, pm):
+    from sklearn.tree import plot_tree as sk_plot_tree
+    ax = canvas.clear()
+    ax.grid(False)
+    names = [n.replace("brand_", "бренд ") for n in pm.tree_features_]
+    sk_plot_tree(pm.tree_, feature_names=names, filled=True, rounded=True, fontsize=7, ax=ax, impurity=False,
+                 precision=2)
+    ax.set_title("Дерево решений для ln(цены), глубина 3 (значение в листе — ln цены)")
+    canvas.done()
+
+
+# ---------- прогноз цен ----------
+def plot_forecast(canvas: MplCanvas, fc):
+    ax = canvas.clear()
+    for k, col in enumerate(fc.index_.columns):
+        s = fc.index_[col]
+        ax.plot(s.index, s.values, lw=1.6, color=PALETTE[k], label=col)
+        f = fc.forecast_.get(col)
+        if f:
+            ax.plot([s.index[-1], *f["dates"]], [s.values[-1], *f["values"]], lw=2, ls="--", color=PALETTE[k])
+    ax.axhline(1, color=MUTED, lw=1)
+    ax.set_ylabel("Индекс цены (1 — обычная цена модели)")
+    ax.set_title("Индекс цен по шпилям и прогноз на 7 дней (пунктир)")
+    ax.legend(fontsize=8)
+    canvas.fig.autofmt_xdate()
+    canvas.done()
+
+
+def plot_price_history(canvas: MplCanvas, hist: pd.DataFrame, title: str, fair: float | None = None):
+    ax = canvas.clear()
+    if hist.empty:
+        ax.text(0.5, 0.5, "Нет истории цен для этой модели", ha="center", va="center", color=MUTED)
+        ax.axis("off")
+        canvas.done()
+        return
+    d = pd.to_datetime(hist["date"])
+    for k, (src, g) in enumerate(hist.assign(d=d).groupby("source")):
+        ax.plot(g["d"], g["price_rub"] / 1000, marker="o", ms=3, lw=1.2, color=PALETTE[k], label=src)
+    ax.axhline(hist["price_rub"].median() / 1000, color=MUTED, ls="--", lw=1, label="обычная цена (медиана)")
+    if fair:
+        ax.axhline(fair / 1000, color=PALETTE[2], ls=":", lw=1.5, label="справедливая (модель)")
+    ax.set_ylabel("тыс. ₽")
+    ax.set_title(title, fontsize=10)
+    ax.legend(fontsize=7)
+    from matplotlib.dates import AutoDateLocator, DateFormatter
+    ax.xaxis.set_major_locator(AutoDateLocator(maxticks=6))
+    ax.xaxis.set_major_formatter(DateFormatter("%d.%m"))
     canvas.done()

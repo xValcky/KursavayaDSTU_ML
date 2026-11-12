@@ -5,21 +5,35 @@
 import numpy as np
 import pandas as pd
 
-from src.ml.features import PHONE_FEATURES, effective_refresh
+from src.ml.features import PHONE_FEATURES, effective_refresh, is_rugged
 
 CLASS_NAMES = {0: "Бюджетный", 1: "Средний", 2: "Флагман"}
 
 # важности 0..10 (ползунки опроса)
 IMPORTANCE_FIELDS = ["imp_camera", "imp_active", "imp_standby", "imp_perf", "imp_compact",
-                     "imp_charge", "imp_storage", "imp_new", "imp_value"]
+                     "imp_charge", "imp_storage", "imp_new", "imp_value", "imp_rugged"]
 IMPORTANCE_TITLES = {
     "imp_camera": "Камера", "imp_active": "Без розетки при активном использовании",
     "imp_standby": "Долго держит заряд в ожидании", "imp_perf": "Производительность",
     "imp_compact": "Компактность и лёгкость", "imp_charge": "Быстрая зарядка",
     "imp_storage": "Много памяти", "imp_new": "Новинка, свежая модель", "imp_value": "Выгодная цена",
+    "imp_rugged": "Прочный защищённый корпус",
+}
+# подсказки к ползункам (показываются при наведении)
+IMPORTANCE_HINTS = {
+    "imp_camera": "Мегапиксели основной камеры. При сценарии «Фото и видео» вес камеры выше.",
+    "imp_active": "Сколько часов телефон проработает с включённым экраном (оценка по батарее, экрану и чипу).",
+    "imp_standby": "Сколько дней продержится в режиме ожидания — важно для «звонилки» и работы.",
+    "imp_perf": "Мощность чипа (AnTuTu), объём ОЗУ и плавность экрана. Выше 120 Гц почти не учитывается.",
+    "imp_compact": "Чем выше, тем сильнее штраф за вес и большую диагональ.",
+    "imp_charge": "Мощность зарядки в ваттах: быстрее заряжается.",
+    "imp_storage": "Объём постоянной и оперативной памяти.",
+    "imp_new": "Год выпуска: свежие модели дольше получают обновления.",
+    "imp_value": "Сильнее тянет к более дешёвым моделям внутри бюджета.",
+    "imp_rugged": "Тяжёлые защищённые «броневики»: падения, вода, огромная батарея. Пригодится курьеру и на стройке.",
 }
 IMPORTANCE_DEFAULTS = {"imp_camera": 5, "imp_active": 6, "imp_standby": 4, "imp_perf": 5, "imp_compact": 3,
-                       "imp_charge": 4, "imp_storage": 4, "imp_new": 3, "imp_value": 5}
+                       "imp_charge": 4, "imp_storage": 4, "imp_new": 3, "imp_value": 5, "imp_rugged": 0}
 # в простом режиме видны только эти ползунки
 SIMPLE_IMPORTANCE = ["imp_camera", "imp_active", "imp_perf", "imp_compact"]
 
@@ -37,6 +51,17 @@ PRESETS = {
     "Работа": {"work": 1, "imp_standby": 8, "imp_active": 7, "imp_storage": 6, "imp_perf": 6, "esim_pref": 1},
     "Для родителей": {"imp_standby": 9, "imp_active": 7, "imp_value": 9, "imp_perf": 2, "imp_camera": 3,
                       "imp_new": 1, "screen_pref": 3},
+    "Такси и курьер": {"work": 1, "imp_active": 10, "imp_standby": 6, "imp_perf": 6, "imp_charge": 6,
+                       "imp_rugged": 6, "imp_camera": 1, "imp_compact": 0, "imp_value": 6},
+}
+PRESET_HINTS = {
+    "Игры": "Мощный чип, плавный экран от 120 Гц, большая диагональ, автономность и быстрая зарядка.",
+    "Фото и видео": "Камера на первом месте, много памяти под видео, хорошая автономность.",
+    "Кино и соцсети": "Большой экран и долгая работа без розетки.",
+    "Работа": "Долго держит заряд, много памяти, eSIM — плюс.",
+    "Для родителей": "Простой и выгодный: долго в ожидании, большой экран, без переплаты за мощность.",
+    "Такси и курьер": "Максимум часов работы с экраном (навигатор весь день), шустрый интерфейс, "
+                      "быстрая зарядка; защищённый корпус — плюс.",
 }
 OS_PREF = {0: "Неважно", 1: "Android", 2: "iOS"}
 # 0 — не нужен, 1 — может быть (плюс, если есть), 2 — обязательно
@@ -89,30 +114,51 @@ def preference_weights(a: dict) -> np.ndarray:
     return w
 
 
-def utility(a: dict, z: np.ndarray, phones: pd.DataFrame) -> np.ndarray:
-    """Полезность каждого телефона для анкеты: качество по интересам минус штрафы."""
-    u = z @ preference_weights(a)
+# Названия жёстких требований (для подсказки «что отсекло больше всего»)
+REQUIREMENT_TITLES = {"budget": "бюджет", "os": "система", "nfc": "NFC", "esim": "eSIM — обязательно",
+                      "ir": "ИК-порт — обязательно", "screen": "размер экрана", "hz": "частота экрана",
+                      "rom": "объём памяти"}
+
+
+def penalty_breakdown(a: dict, phones: pd.DataFrame) -> pd.DataFrame:
+    """Штрафы по каждому требованию отдельно (строка — телефон, колонка — требование)."""
     price = phones["price_rub"].to_numpy()
     ratio = price / a["budget_rub"]
-    u -= 30.0 * np.clip(ratio - 1.0, 0, None)  # дороже бюджета — резко хуже
-    u -= (0.3 + 2.0 * a["imp_value"] / 10) * ratio  # чем важнее выгода, тем сильнее тянет к дешёвым
+    n = len(phones)
+    zero = np.zeros(n)
+    os_bad = zero
     if a["os_pref"] == 1:
-        u -= 6.0 * (phones["os"] != "Android").to_numpy()
+        os_bad = (phones["os"] != "Android").to_numpy()
     elif a["os_pref"] == 2:
-        u -= 6.0 * (phones["os"] != "iOS").to_numpy()
-    if a["need_nfc"]:
-        u -= 6.0 * (phones["nfc"].to_numpy() == 0)
-    if a["esim_pref"] == 2:
-        u -= 6.0 * (phones["esim"].to_numpy() == 0)
-    if a["ir_pref"] == 2:
-        u -= 6.0 * (phones["ir_port"].to_numpy() == 0)
+        os_bad = (phones["os"] != "iOS").to_numpy()
     lo, hi = SCREEN_PREF[a["screen_pref"]][1]
     screen = phones["screen_in"].to_numpy()
     miss = np.clip(lo - screen, 0, None) + np.clip(screen - hi, 0, None)
-    u -= 15.0 * miss + 3.0 * (miss > 0)  # не тот размер — почти как неподходящая ОС
-    u -= 5.0 * (phones["refresh_hz"].to_numpy() < a["min_hz"])
-    u -= 3.0 * (phones["rom_gb"].to_numpy() < a["min_rom"])
-    return u
+    return pd.DataFrame({
+        "budget": 30.0 * np.clip(ratio - 1.0, 0, None),           # дороже бюджета — резко хуже
+        "os": 6.0 * os_bad,
+        "nfc": 6.0 * (phones["nfc"].to_numpy() == 0) if a["need_nfc"] else zero,
+        "esim": 6.0 * (phones["esim"].to_numpy() == 0) if a["esim_pref"] == 2 else zero,
+        "ir": 6.0 * (phones["ir_port"].to_numpy() == 0) if a["ir_pref"] == 2 else zero,
+        "screen": 15.0 * miss + 3.0 * (miss > 0),                  # не тот размер — почти как неподходящая ОС
+        "hz": 5.0 * (phones["refresh_hz"].to_numpy() < a["min_hz"]),
+        "rom": 3.0 * (phones["rom_gb"].to_numpy() < a["min_rom"]),
+    })
+
+
+def feasible_mask(a: dict, phones: pd.DataFrame, slack: float = 1.1) -> np.ndarray:
+    """Телефоны, проходящие все жёсткие требования и не дороже бюджета более чем на 10%."""
+    pen = penalty_breakdown(a, phones).drop(columns="budget")
+    return (pen.sum(axis=1).to_numpy() == 0) & (phones["price_rub"].to_numpy() <= a["budget_rub"] * slack)
+
+
+def utility(a: dict, z: np.ndarray, phones: pd.DataFrame) -> np.ndarray:
+    """Полезность каждого телефона для анкеты: качество по интересам минус штрафы."""
+    u = z @ preference_weights(a)
+    ratio = phones["price_rub"].to_numpy() / a["budget_rub"]
+    u -= (0.3 + 2.0 * a["imp_value"] / 10) * ratio  # чем важнее выгода, тем сильнее тянет к дешёвым
+    u += a.get("imp_rugged", 0) / 10 * 1.2 * is_rugged(phones)  # «броневик» — плюс, а не мусор
+    return u - penalty_breakdown(a, phones).sum(axis=1).to_numpy()
 
 
 def survey_vector(a: dict) -> np.ndarray:
@@ -132,6 +178,7 @@ def random_survey(rng: np.random.Generator) -> dict:
         "imp_camera": imp(4 + 4 * photo), "imp_active": imp(6 + gaming), "imp_standby": imp(4 + 2 * work),
         "imp_perf": imp(4 + 4 * gaming), "imp_compact": imp(3), "imp_charge": imp(4 + 2 * gaming),
         "imp_storage": imp(4 + 3 * photo), "imp_new": imp(3), "imp_value": imp(5),
+        "imp_rugged": int(np.clip(round(rng.normal(1 + 3 * work, 2.5)), 0, 10)),
         "gaming": int(gaming), "photo": int(photo), "work": int(work),
         "os_pref": pick([0, 1, 2], [0.5, 0.3, 0.2]),
         "need_nfc": int(rng.random() < 0.8),

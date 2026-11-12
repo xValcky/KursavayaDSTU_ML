@@ -143,7 +143,8 @@ class PhoneCard(QFrame):
     """Карточка: картинка, название, цена, класс/кластер, плюсы, кнопки."""
 
     def __init__(self, p: pd.Series, pros: list[str] | None = None, badge: str = "",
-                 on_similar=None, on_like=None, compact: bool = False, note: str = ""):
+                 on_similar=None, on_like=None, compact: bool = False, note: str = "", on_favorite=None,
+                 is_favorite: bool = False):
         super().__init__()
         self.setObjectName("card")
         lay = QHBoxLayout(self)
@@ -167,7 +168,20 @@ class PhoneCard(QFrame):
         price = QLabel(money(p["price_rub"]))
         price.setObjectName("cardPrice")
         col.addWidget(price)
-        meta = hint(f"{p.get('class_name', '')} · {p.get('cluster_name', '')}" + (f" · {note}" if note else ""))
+        badges = list(p.get("badges", []) or [])
+        if badges:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            for text in badges:
+                chip = QLabel(text)
+                good = text.startswith("выгодно")
+                bad = text.startswith("переплата")
+                chip.setObjectName("chipGood" if good else "chipBad" if bad else "chipInfo")
+                row.addWidget(chip)
+            row.addStretch()
+            col.addLayout(row)
+        group = str(p.get("cluster_name", "")).split(" · ")[-1]  # шпиль уже виден по классу
+        meta = hint(f"{p.get('class_name', '')} · {group}" + (f" · {note}" if note else ""))
         col.addWidget(meta)
         if not compact:
             specs = hint(f"{p['ram_gb']:.0f}/{p['rom_gb']:.0f} ГБ · экран {p['screen_in']:g}″ {p['refresh_hz']:.0f} Гц · "
@@ -188,6 +202,12 @@ class PhoneCard(QFrame):
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda: on_like(int(p["id"])))
             btns.addWidget(b)
+        if on_favorite:
+            b = QPushButton("★ В избранном" if is_favorite else "☆ В избранное")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda: (on_favorite(str(p["model"])),
+                                       b.setText("★ В избранном" if b.text().startswith("☆") else "☆ В избранное")))
+            btns.addWidget(b)
         btns.addStretch()
         col.addLayout(btns)
         lay.addLayout(col, 1)
@@ -206,21 +226,36 @@ def clear_layout(layout):
 class SimilarDialog(QDialog):
     """Окно телефона с подборкой похожих по выбранному параметру."""
 
-    def __init__(self, pipe, phone_id: int, parent=None, by: str = "all"):
+    def __init__(self, pipe, phone_id: int, parent=None, by: str = "all", fair: dict | None = None,
+                 history_fn=None, advice_fn=None, on_favorite=None, favorites=None):
         super().__init__(parent)
-        self.pipe = pipe
+        self.pipe, self.fair = pipe, fair
+        self.history_fn, self.advice_fn = history_fn, advice_fn
+        self.on_favorite, self.favorites = on_favorite, favorites if favorites is not None else set()
         self.setWindowTitle("Похожие телефоны")
-        self.resize(980, 720)
+        self.resize(1040, 820)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 16, 16, 16)
+        top = QHBoxLayout()
         self.head = QVBoxLayout()
-        lay.addLayout(self.head)
+        top.addLayout(self.head, 3)
+        side = QVBoxLayout()
+        self.history_canvas = charts.MplCanvas(4.5, 2.4)
+        self.advice = QLabel()
+        self.advice.setObjectName("cardTitle")
+        self.advice.setWordWrap(True)
+        side.addWidget(self.history_canvas, 1)
+        side.addWidget(self.advice)
+        top.addLayout(side, 2)
+        lay.addLayout(top)
         row = QHBoxLayout()
         row.addWidget(QLabel("Похожие по:"))
         self.by = QComboBox()
         for key, (title, _) in SIMILAR_BY.items():
+            if key == "undervalued" and not fair:
+                continue
             self.by.addItem(title, key)
-        self.by.setCurrentIndex(list(SIMILAR_BY).index(by))
+        self.by.setCurrentIndex(max(0, self.by.findData(by)))
         self.by.currentIndexChanged.connect(lambda _: self.show_phone(self.phone_id))
         row.addWidget(self.by)
         row.addStretch()
@@ -238,13 +273,24 @@ class SimilarDialog(QDialog):
     def show_phone(self, phone_id: int):
         self.phone_id = phone_id
         clear_layout(self.head)
-        self.head.addWidget(PhoneCard(phone_row(self.pipe, phone_id), badge="Выбранный телефон"))
+        p0 = phone_row(self.pipe, phone_id, self.fair)
+        self.head.addWidget(PhoneCard(p0, badge="Выбранный телефон", on_favorite=self.on_favorite,
+                                      is_favorite=str(p0["model"]) in self.favorites))
+        if self.history_fn:
+            hist = self.history_fn(phone_id)
+            charts.plot_price_history(self.history_canvas, hist, f"История цены: {p0['full_name']}",
+                                      p0.get("fair_price"))
+            text = self.advice_fn(phone_id, hist) if self.advice_fn else None
+            self.advice.setText(text or "")
         clear_layout(self.grid)
-        sim = similar_phones(self.pipe, phone_id, self.by.currentData(), n=6)
+        sim = similar_phones(self.pipe, phone_id, self.by.currentData(), n=6, fair=self.fair)
         for k, r in sim.iterrows():
-            p = phone_row(self.pipe, int(r["id"]))
-            card = PhoneCard(p, compact=True, on_similar=self.show_phone,
-                             note=f"сходство {r['Сходство']}, {r['Разница в цене']}")
+            p = phone_row(self.pipe, int(r["id"]), self.fair)
+            note = f"сходство {r['Сходство']}, {r['Разница в цене']}"
+            if r.get("К справедливой"):
+                note += f", к справедливой {r['К справедливой']}"
+            card = PhoneCard(p, compact=True, on_similar=self.show_phone, note=note, on_favorite=self.on_favorite,
+                             is_favorite=str(p["model"]) in self.favorites)
             self.grid.addWidget(card, k // 2, k % 2)
 
 
@@ -416,10 +462,10 @@ class SandboxWidget(QWidget):
                            "сразу пересчитаются. «Сохранить» делает эту модель основной."))
         box = QGroupBox("Настройки")
         g = QGridLayout(box)
-        self.auto_k = QCheckBox("подобрать автоматически по силуэту")
+        self.auto_k = QCheckBox("подобрать автоматически по силуэту (в каждом шпиле)")
         self.auto_k.setChecked(True)
         self.k = QSpinBox()
-        self.k.setRange(2, 12)
+        self.k.setRange(2, 8)
         self.k.setValue(5)
         self.auto_k.toggled.connect(lambda on: self.k.setEnabled(not on))
         self.k.setEnabled(False)
@@ -437,7 +483,7 @@ class SandboxWidget(QWidget):
         self.surveys_lbl = QLabel("6000")
         self.surveys_lbl.setObjectName("value")
         self.surveys.valueChanged.connect(lambda v: self.surveys_lbl.setText(f"{v * 1000}"))
-        g.addWidget(QLabel("Кластеров k"), 0, 0)
+        g.addWidget(QLabel("Групп k в шпиле"), 0, 0)
         g.addWidget(self.k, 0, 1)
         g.addWidget(self.auto_k, 0, 2)
         g.addWidget(QLabel("Скрытые слои MLP"), 1, 0)

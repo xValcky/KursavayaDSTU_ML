@@ -11,3 +11,5 @@ data/phones.db
 models/
 PhonePicker_data/
 .env
+reports/
+.pytest_cache/

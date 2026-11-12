@@ -43,7 +43,16 @@ def effective_refresh(hz):
 
 
 # Признаки, к которым применяется логарифм (сильно скошенные распределения).
-LOG_FEATURES = ["price_rub", "ram_gb", "rom_gb", "battery_mah", "antutu_k", "charge_w", "weight_g"]
+LOG_FEATURES = ["price_rub", "ram_gb", "rom_gb", "battery_mah", "antutu_k", "charge_w", "weight_g", "camera_mp"]
+# Перцентили для «подрезки» выбросов перед стандартизацией (один «кирпич» на 15 000 мА·ч
+# иначе сжимает шкалу батареи у всех остальных моделей).
+CLIP_Q = (5, 95)
+RUGGED_WEIGHT_G = 300
+
+
+def is_rugged(df: pd.DataFrame) -> np.ndarray:
+    """Защищённый «броневик»: тяжёлый корпус (≥ 300 г). Правило надёжнее, чем надежда на KMeans."""
+    return (df["weight_g"].to_numpy(dtype=float) >= RUGGED_WEIGHT_G)
 
 
 def phone_matrix(df: pd.DataFrame) -> np.ndarray:
@@ -64,9 +73,19 @@ class PhoneFeatureSpace:
         self.weights_ = np.ones(len(PHONE_FEATURES))
         self.mi_ = None
         self.pca2_ = None
+        self.clip_lo_ = self.clip_hi_ = None
+
+    def _clip(self, m: np.ndarray) -> np.ndarray:
+        return np.clip(m, self.clip_lo_, self.clip_hi_)
 
     def fit(self, df: pd.DataFrame, labels: np.ndarray | None = None):
-        z = self.scaler.fit_transform(phone_matrix(df))
+        m = phone_matrix(df)
+        # подрезаем только «непрерывные» признаки; у флагов 0/1 перцентили схлопнулись бы
+        lo, hi = np.percentile(m, CLIP_Q, axis=0)
+        binary = np.array([len(np.unique(col)) <= 2 for col in m.T])
+        self.clip_lo_ = np.where(binary, -np.inf, lo)
+        self.clip_hi_ = np.where(binary, np.inf, hi)
+        z = self.scaler.fit_transform(self._clip(m))
         if self.use_weights:
             expert = np.array([EXPERT_WEIGHTS[f] for f in PHONE_FEATURES])
             if labels is not None:
@@ -90,7 +109,7 @@ class PhoneFeatureSpace:
         return self
 
     def standardize(self, df: pd.DataFrame) -> np.ndarray:
-        return self.scaler._transform(phone_matrix(df))
+        return self.scaler._transform(self._clip(phone_matrix(df)))
 
     def transform(self, df: pd.DataFrame) -> np.ndarray:
         return self.standardize(df) * np.sqrt(self.weights_)
