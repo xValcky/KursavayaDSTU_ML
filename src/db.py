@@ -120,14 +120,14 @@ def _seed_hash() -> str:
 
 
 def _load_history_seed(conn) -> int:
-    """История цен из Telegram (tools/merge_sources.py) → таблица price_history."""
+    """История цен (Telegram + августовская оценка, tools/merge_sources.py) → таблица price_history."""
     if not HISTORY_SEED_PATH.exists():
         return 0
     hist = pd.read_csv(HISTORY_SEED_PATH)
     ids = dict(conn.execute("SELECT model, id FROM phones").fetchall())
     rows = [(ids[m], float(p), s, d) for m, d, s, p in hist[["model", "date", "source", "price_rub"]].itertuples(
         index=False) if m in ids]
-    conn.execute("DELETE FROM price_history WHERE source LIKE 'telegram:%'")
+    conn.execute("DELETE FROM price_history WHERE source LIKE 'telegram:%' OR source LIKE 'оценка%'")
     conn.executemany("INSERT INTO price_history (phone_id, price_rub, source, created) VALUES (?,?,?,?)", rows)
     return len(rows)
 

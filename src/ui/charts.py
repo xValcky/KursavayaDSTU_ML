@@ -554,6 +554,10 @@ def plot_price_history(canvas: MplCanvas, hist: pd.DataFrame, title: str, fair: 
     ax.axhline(hist["price_rub"].median() / 1000, color=MUTED, ls="--", lw=1, label="обычная цена (медиана)")
     if fair:
         ax.axhline(fair / 1000, color=PALETTE[2], ls=":", lw=1.5, label="справедливая (модель)")
+    if len(hist) == 1:
+        ax.annotate("в каналах цен не было —\nесть только оценка августа 2026", (d.iloc[0], hist["price_rub"].iloc[0] / 1000),
+                    xytext=(0, -28), textcoords="offset points", ha="center", fontsize=8, color=MUTED)
+        ax.set_xlim(d.iloc[0] - pd.Timedelta(days=20), d.iloc[0] + pd.Timedelta(days=20))
     ax.set_ylabel("тыс. ₽")
     ax.set_title(title, fontsize=10)
     ax.legend(fontsize=7)

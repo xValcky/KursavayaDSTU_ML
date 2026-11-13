@@ -23,6 +23,7 @@ SRC = ROOT / "data" / "sources"
 OUT = ROOT / "data" / "phones_seed.csv"
 HISTORY_OUT = ROOT / "data" / "price_history_seed.csv"
 FRESH_FROM = "2026-09-06"
+BASE_DATE, BASE_SOURCE = "2026-08-01", "оценка: август 2026"
 EXCLUDED_BRANDS = {"Huawei", "Sony", "Meizu"}
 EXCLUDED_MODELS = {"realme 16 Pro (Harry Potter Edition)"}
 # позиции постов, которые нельзя сопоставлять ни с какой моделью (лимитки и т.п.)
@@ -115,6 +116,7 @@ def main():
     df, stats = load_specs()
     prices, unmatched = collect_prices(df)
     updated, history = 0, []
+    base_price = df["price_rub"].copy()  # оценка до замены ценами из каналов
     for idx, obs in prices.items():
         vals = sorted(p for _, p, _ in obs)
         med = vals[len(vals) // 2]
@@ -124,6 +126,17 @@ def main():
         if res:
             df.loc[idx, "price_rub"], df.loc[idx, "price_source"] = res
             updated += 1
+    # стартовая точка истории — августовская оценка: так график есть у каждой модели,
+    # а не только у тех, что встречались в каналах (у остальных точек не было вовсе)
+    for idx, p in base_price.items():
+        if pd.isna(p):
+            continue
+        obs = prices.get(idx)
+        if obs:
+            med = sorted(x for _, x, _ in obs)[len(obs) // 2]
+            if not 0.55 * med <= p <= 1.8 * med:
+                continue
+        history.append({"model": df.loc[idx, "model"], "date": BASE_DATE, "price_rub": int(p), "source": BASE_SOURCE})
     df = df[COLUMNS].sort_values(["brand", "price_rub"], ascending=[True, False])
     for c in ["year", "price_rub", "ram_gb", "rom_gb", "battery_mah", "refresh_hz", "weight_g", "camera_mp",
               "antutu_k", "charge_w", "has_5g", "nfc", "esim", "ir_port"]:
