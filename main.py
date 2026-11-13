@@ -13,7 +13,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(build_qss("light"))  # окно само применит сохранённую тему
+    app.setStyleSheet(build_qss("dark"))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

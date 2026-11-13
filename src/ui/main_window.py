@@ -22,7 +22,7 @@ from src.providers.base import ENV_PATH, ProviderError, all_providers
 from src.ui import charts
 from src.ui.style import build_palette, build_qss
 from src.ui.widgets import (DUEL_ROWS, DuelWidget, GuessGame, PandasModel, PhoneCard, SandboxWidget, SimilarDialog,
-                            Task, clear_layout, hint, make_table, page, pool, selected_id, split)
+                            SpecsDialog, Task, clear_layout, hint, make_table, page, pool, selected_id, split)
 
 CATALOG_COLUMNS = {
     "id": "id", "brand": "Бренд", "model": "Модель", "price_rub": "Цена, ₽", "os": "ОС", "year": "Год",
@@ -94,15 +94,9 @@ class MainWindow(QMainWindow):
             self.mode_group.addButton(b)
             sg.addWidget(b)
         self.btn_pro.toggled.connect(self.set_mode)
-        self.btn_theme = QPushButton()
-        self.btn_theme.setObjectName("themeBtn")
-        self.btn_theme.setCursor(Qt.PointingHandCursor)
-        self.btn_theme.clicked.connect(self.toggle_theme)
         cl.addWidget(segment)
-        cl.addWidget(self.btn_theme)
         self.tabs.setCornerWidget(corner, Qt.TopRightCorner)
-        self.theme = self.settings.value("theme", "light")
-        self.apply_theme(self.theme, rerender=False)
+        self.apply_theme("dark")  # оставлена только тёмная тема
 
         db.init_db()
         self.reload_phones()
@@ -129,24 +123,13 @@ class MainWindow(QMainWindow):
         self.phones = self.phones_all[self.phones_all["archived"].fillna(0) == 0]
 
     # ===== Тема =====
-    def apply_theme(self, theme: str, rerender: bool = True):
+    def apply_theme(self, theme: str):
+        """Тема применяется один раз при запуске, до первого рисования графиков."""
         self.theme = theme
-        self.settings.setValue("theme", theme)
         charts.set_theme(theme)
         app = QApplication.instance()
         app.setPalette(build_palette(theme))
         app.setStyleSheet(build_qss(theme))
-        self.btn_theme.setText("☀  Светлая" if theme == "dark" else "☾  Тёмная")
-        self.btn_theme.setToolTip("Переключить тему оформления")
-        if rerender and self.pipe is not None:
-            self.refresh_analytics()
-            self.refresh_aux()
-            self.duel.refresh()
-            if self.last_res:
-                self.render_results()
-
-    def toggle_theme(self):
-        self.apply_theme("light" if self.theme == "dark" else "dark")
 
     # ===== Режимы =====
     def set_mode(self, pro: bool):
@@ -480,7 +463,8 @@ class MainWindow(QMainWindow):
     def _card(self, r, badge: str = "") -> PhoneCard:
         p = phone_row(self.pipe, int(r["id"]), self.fair)
         return PhoneCard(p, pros=r["_pros"], badge=badge, on_similar=self.open_similar, on_like=self.like_phone,
-                         on_favorite=self.toggle_favorite, is_favorite=str(p["model"]) in self.favorites)
+                         on_favorite=self.toggle_favorite, is_favorite=str(p["model"]) in self.favorites,
+                         on_details=self.open_specs)
 
     def show_more_cards(self):
         nxt = self.more_rows[self.cards_shown:self.cards_shown + CARD_STEP]
@@ -556,12 +540,17 @@ class MainWindow(QMainWindow):
         self.result_model = PandasModel()
         self.result_view = make_table(self.result_model)
         self.result_view.selectionModel().selectionChanged.connect(lambda *_: self.show_explain())
+        self.result_view.doubleClicked.connect(
+            lambda _: self._with_selected(self.result_view, self.result_model, self.open_specs))
         btns = QHBoxLayout()
         for text, liked, name in (("Подходит", True, "like"), ("Не подходит", False, "dislike")):
             b = QPushButton(text)
             b.setObjectName(name)
             b.clicked.connect(lambda _=False, v=liked: self.on_feedback(v))
             btns.addWidget(b)
+        b_specs = QPushButton("Все характеристики")
+        b_specs.clicked.connect(lambda: self._with_selected(self.result_view, self.result_model, self.open_specs))
+        btns.addWidget(b_specs)
         b_sim = QPushButton("Похожие и история цены")
         b_sim.clicked.connect(lambda: self._with_selected(self.result_view, self.result_model, self.open_similar))
         b_duel = QPushButton("В дуэль с лидером")
@@ -570,7 +559,7 @@ class MainWindow(QMainWindow):
         b_fav.clicked.connect(lambda: self._with_selected(self.result_view, self.result_model, self.favorite_by_id))
         for b in (b_sim, b_duel, b_fav):
             btns.addWidget(b)
-        btns.addWidget(hint("выделите строку"))
+        btns.addWidget(hint("выделите строку · двойной клик — все характеристики"))
         btns.addStretch()
         top = QWidget()
         tl = QVBoxLayout(top)
@@ -617,6 +606,14 @@ class MainWindow(QMainWindow):
             diff = self.pipe.phones_.iloc[i[0]]["price_rub"] / fair - 1
             text = (text + " " if text else "") + f"Справедливая цена по модели — {fair:,.0f} ₽ ({diff:+.0%}).".replace(",", " ")
         return text
+
+    def open_specs(self, phone_id: int):
+        if self.pipe is None:
+            return
+        p = phone_row(self.pipe, phone_id, self.fair)
+        hist = db.get_price_history(phone_id)
+        SpecsDialog(p, self, history=hist, advice_text=self.phone_advice(phone_id, hist), on_similar=self.open_similar,
+                    on_favorite=self.toggle_favorite, is_favorite=str(p["model"]) in self.favorites).exec()
 
     def open_similar(self, phone_id: int):
         if self.pipe is not None:
@@ -987,6 +984,9 @@ class MainWindow(QMainWindow):
         charts.plot_weights(self.c_weights, wt)
         charts.plot_training(self.c_train, p)
         charts.plot_ensemble_error(self.c_enserr)
+        if self.price_model is None:
+            for c in (self.c_regr, self.c_tree, self.c_forecast):
+                charts.plot_placeholder(c, "Справедливые цены и прогноз считаются в фоне…")
         t = p.metrics_["test"]
         self.metrics_label.setText(
             f"Нейросеть на тесте: accuracy {t['accuracy']:.3f} · F1 {t['f1_macro']:.3f} · "
@@ -995,6 +995,10 @@ class MainWindow(QMainWindow):
 
     def refresh_experiments(self):
         if not self.exp:
+            msg = ("Сравнение моделей ещё не посчитано.\n"
+                   "Оно запускается само в фоне (2–4 минуты)\nили кнопкой «Сравнить модели» вверху.")
+            for c in (self.c_ablation, self.c_roc, self.c_regions):
+                charts.plot_placeholder(c, msg)
             return
         charts.plot_ablation(self.c_ablation, self.exp["ablation"])
         self.ablation_model.set_df(self.exp["ablation"].round(4))
@@ -1116,6 +1120,8 @@ class MainWindow(QMainWindow):
         if self.last_res:
             self.on_pick()
         self.statusBar().showMessage("Справедливые цены и прогноз готовы.", 4000)
+        if self.exp is None and self.btn_exp.isEnabled():
+            self.run_experiments()  # чтобы вкладки «Сравнение моделей» и «Ансамбли» не были пустыми
 
     def run_experiments(self):
         if self.pipe is None:

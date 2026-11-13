@@ -49,11 +49,22 @@ def ensure_runtime_files() -> None:
                 if (SOURCE_ROOT / "data" / name).exists():
                     shutil.copy2(SOURCE_ROOT / "data" / name, DATA_DIR / name)
         return
+    # Модели из новой сборки exe заменяют старые: иначе после обновления exe в папке данных
+    # остаются файлы прошлой версии, они не подходят по версии и вкладки аналитики пустеют.
+    # База (с анкетами и отзывами) не заменяется — она сама синхронизируется с датасетом.
+    import hashlib
+    bundled = BUNDLE_DIR / "models" / "pipeline.joblib"
+    stamp_file = MODELS_DIR / ".bundle_hash"
+    stamp = hashlib.md5(bundled.read_bytes()).hexdigest() if bundled.exists() else ""
+    fresh_build = stamp and (not stamp_file.exists() or stamp_file.read_text() != stamp)
     for rel in ("data/phones.db", "models/pipeline.joblib", "models/experiments.joblib",
                 "models/price_model.joblib", ".env.example"):
         src, dst = BUNDLE_DIR / rel, APP_DIR / rel
-        if src.exists() and not dst.exists():
+        replace = fresh_build and rel.startswith("models/")
+        if src.exists() and (replace or not dst.exists()):
             shutil.copy2(src, dst)
+    if fresh_build:
+        stamp_file.write_text(stamp)
     for name in seeds:
         if (BUNDLE_DIR / "data" / name).exists():
             shutil.copy2(BUNDLE_DIR / "data" / name, DATA_DIR / name)

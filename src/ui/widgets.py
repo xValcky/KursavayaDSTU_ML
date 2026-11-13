@@ -144,9 +144,13 @@ class PhoneCard(QFrame):
 
     def __init__(self, p: pd.Series, pros: list[str] | None = None, badge: str = "",
                  on_similar=None, on_like=None, compact: bool = False, note: str = "", on_favorite=None,
-                 is_favorite: bool = False):
+                 is_favorite: bool = False, on_details=None):
         super().__init__()
         self.setObjectName("card")
+        self.on_details, self.phone_id = on_details, int(p["id"])
+        if on_details:
+            self.setCursor(Qt.PointingHandCursor)
+            self.setToolTip("Нажмите на карточку — откроются все характеристики")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(14)
@@ -191,6 +195,11 @@ class PhoneCard(QFrame):
             col.addWidget(QLabel(f"✓ {pro}"))
         col.addStretch()
         btns = QHBoxLayout()
+        if on_details:
+            b = QPushButton("Все характеристики")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda: on_details(int(p["id"])))
+            btns.addWidget(b)
         if on_similar:
             b = QPushButton("Похожие")
             b.setCursor(Qt.PointingHandCursor)
@@ -211,6 +220,89 @@ class PhoneCard(QFrame):
         btns.addStretch()
         col.addLayout(btns)
         lay.addLayout(col, 1)
+
+
+    def mouseReleaseEvent(self, event):
+        # клик по самой карточке (не по кнопке) — открыть все характеристики
+        if self.on_details and event.button() == Qt.LeftButton:
+            self.on_details(self.phone_id)
+        super().mouseReleaseEvent(event)
+
+
+def yes_no(v) -> str:
+    return "есть" if int(v) else "нет"
+
+
+def spec_rows(p: pd.Series) -> list[tuple[str, str, str]]:
+    """Все характеристики телефона по разделам: (раздел, параметр, значение)."""
+    from src.ml.features import effective_refresh
+    rub = lambda v: f"{v:,.0f} ₽".replace(",", " ")
+    fair = p.get("fair_price")
+    rows = [
+        ("Основное", "Бренд", p["brand"]), ("Основное", "Модель", p["model"]), ("Основное", "Система", p["os"]),
+        ("Основное", "Год выпуска", f"{p['year']:.0f}"), ("Основное", "Класс", p.get("class_name", "")),
+        ("Основное", "Группа (кластер)", p.get("cluster_name", "")),
+        ("Цена", "Цена", rub(p["price_rub"])), ("Цена", "Источник цены", str(p.get("price_source", ""))),
+        ("Цена", "Справедливая цена (модель)", rub(fair) if fair else "считается…"),
+        ("Цена", "К справедливой", f"{p['price_rub'] / fair - 1:+.0%}" if fair else "—"),
+        ("Производительность", "AnTuTu", f"{p['antutu_k']:,.0f} тыс. баллов".replace(",", " ")),
+        ("Производительность", "Оперативная память", f"{p['ram_gb']:.0f} ГБ"),
+        ("Производительность", "Встроенная память", f"{p['rom_gb']:.0f} ГБ"),
+        ("Экран", "Диагональ", f"{p['screen_in']:g}″"),
+        ("Экран", "Частота обновления", f"{p['refresh_hz']:.0f} Гц"),
+        ("Экран", "Эффективная частота (выше 120 Гц × 0,2)", f"{float(effective_refresh(p['refresh_hz'])):.1f} Гц"),
+        ("Камера", "Основная камера", f"{p['camera_mp']:.0f} МП"),
+        ("Батарея", "Ёмкость", f"{p['battery_mah']:,.0f} мА·ч".replace(",", " ")),
+        ("Батарея", "Мощность зарядки", f"{p['charge_w']:.0f} Вт"),
+        ("Батарея", "Активная работа (оценка)", f"≈{p['active_h']:.1f} ч"),
+        ("Батарея", "В режиме ожидания (оценка)", f"≈{p['standby_d']:.1f} дн."),
+        ("Корпус", "Вес", f"{p['weight_g']:.0f} г"),
+        ("Корпус", "Защищённый «броневик»", "да" if p["weight_g"] >= 300 else "нет"),
+        ("Связь и функции", "5G", yes_no(p["has_5g"])), ("Связь и функции", "NFC", yes_no(p["nfc"])),
+        ("Связь и функции", "eSIM", yes_no(p["esim"])), ("Связь и функции", "ИК-порт (пульт)", yes_no(p["ir_port"])),
+    ]
+    return [(sec, name, str(val)) for sec, name, val in rows]
+
+
+class SpecsDialog(QDialog):
+    """Все характеристики телефона: карточка, полная таблица по разделам, история цены и совет."""
+
+    def __init__(self, p: pd.Series, parent=None, history=None, advice_text: str | None = None,
+                 on_similar=None, on_favorite=None, is_favorite: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle(f"Характеристики: {p.get('full_name', p['model'])}")
+        self.resize(1000, 760)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        top = QHBoxLayout()
+        top.addWidget(PhoneCard(p, on_favorite=on_favorite, is_favorite=is_favorite), 3)
+        side = QVBoxLayout()
+        canvas = charts.MplCanvas(4.5, 2.4)
+        charts.plot_price_history(canvas, history if history is not None else pd.DataFrame(),
+                                  "История цены", p.get("fair_price"))
+        side.addWidget(canvas, 1)
+        if advice_text:
+            adv = QLabel(advice_text)
+            adv.setObjectName("cardTitle")
+            adv.setWordWrap(True)
+            side.addWidget(adv)
+        top.addLayout(side, 2)
+        lay.addLayout(top)
+        model = PandasModel(pd.DataFrame(spec_rows(p), columns=["Раздел", "Параметр", "Значение"]))
+        table = make_table(model)
+        table.setSortingEnabled(False)
+        lay.addWidget(table, 1)
+        btns = QHBoxLayout()
+        btns.addStretch()
+        if on_similar:
+            b = QPushButton("Похожие телефоны")
+            b.clicked.connect(lambda: (self.accept(), on_similar(int(p["id"]))))
+            btns.addWidget(b)
+        close = QPushButton("Закрыть")
+        close.setObjectName("primary")
+        close.clicked.connect(self.accept)
+        btns.addWidget(close)
+        lay.addLayout(btns)
 
 
 def clear_layout(layout):

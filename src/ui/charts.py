@@ -561,3 +561,11 @@ def plot_price_history(canvas: MplCanvas, hist: pd.DataFrame, title: str, fair: 
     ax.xaxis.set_major_locator(AutoDateLocator(maxticks=6))
     ax.xaxis.set_major_formatter(DateFormatter("%d.%m"))
     canvas.done()
+
+
+def plot_placeholder(canvas: MplCanvas, text: str):
+    """Пустой график с пояснением, чтобы вкладка не выглядела «сломанной»."""
+    ax = canvas.clear()
+    ax.axis("off")
+    ax.text(0.5, 0.5, text, ha="center", va="center", color=MUTED, fontsize=11, wrap=True)
+    canvas.done()

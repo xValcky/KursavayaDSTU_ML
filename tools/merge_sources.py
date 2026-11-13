@@ -24,12 +24,15 @@ OUT = ROOT / "data" / "phones_seed.csv"
 HISTORY_OUT = ROOT / "data" / "price_history_seed.csv"
 FRESH_FROM = "2026-09-06"
 EXCLUDED_BRANDS = {"Huawei", "Sony", "Meizu"}
+EXCLUDED_MODELS = {"realme 16 Pro (Harry Potter Edition)"}
+# позиции постов, которые нельзя сопоставлять ни с какой моделью (лимитки и т.п.)
+EXCLUDED_RAW = re.compile(r"harry\s*potter", re.I)
 COLUMNS = ["brand", "model", "os", "year", "price_rub", "ram_gb", "rom_gb", "battery_mah", "screen_in",
            "refresh_hz", "weight_g", "camera_mp", "antutu_k", "charge_w", "has_5g", "nfc", "esim", "ir_port",
            "price_source"]
 # Названия в постах, которые отличаются от названия модели в базе
 ALIASES = {"galaxys26ultra": ["samsungs26ultra"], "phone(3)": ["nothingphone3"], "motog100s": ["motorolag100s"],
-           "legiony70(2026)": ["legiony70"], "realme16pro(harrypotteredition)": ["realme16proharrypotter"],
+           "legiony70(2026)": ["legiony70"],
            "nubiaz70sultra": ["nubiaz70sultra"], "vivoiqoo15t": ["iqoo15t"]}
 
 
@@ -57,7 +60,7 @@ def load_specs() -> pd.DataFrame:
             else:
                 df = pd.concat([df, pd.DataFrame([{**values, "_k": k}])], ignore_index=True)
                 stats["added"] += 1
-    df = df[~df["brand"].isin(EXCLUDED_BRANDS)].reset_index(drop=True)
+    df = df[~df["brand"].isin(EXCLUDED_BRANDS) & ~df["model"].isin(EXCLUDED_MODELS)].reset_index(drop=True)
     return df, stats
 
 
@@ -83,6 +86,8 @@ def collect_prices(df: pd.DataFrame) -> tuple[dict, list]:
         if not path.exists():
             continue
         for it in json.loads(path.read_text(encoding="utf-8")):
+            if EXCLUDED_RAW.search(it["name"]):
+                continue
             idx = match_model(it["name"], keys)
             if idx is None:
                 unmatched.append(it["name"])
