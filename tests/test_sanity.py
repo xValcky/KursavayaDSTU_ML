@@ -102,3 +102,33 @@ def test_diversity(pipe, preset):
 def test_hint_when_requirements_too_strict(pipe):
     r = recommend(pipe, answers(budget_rub=12000, esim_pref=2, ir_pref=2))
     assert r["hint"] is not None and r["hint"]["text"]
+
+
+# ---------- жёсткие требования, вилка цены, сегменты ----------
+def test_ios_requirement_is_a_filter(pipe):
+    """Система «iOS» — в топ-10 только Apple (раньше штраф проигрывал «цифрам» Android)."""
+    t = recommend(pipe, answers(budget_rub=120000, os_pref=2), top_n=10)["table"]
+    assert all(n.startswith("Apple") for n in t["Телефон"]), list(t["Телефон"])
+
+
+def test_unmet_requirement_is_labelled(pipe):
+    """Если подходящих меньше, чем строк, добор неподходящими подписан «не подходит: …»."""
+    t = recommend(pipe, answers(budget_rub=120000, os_pref=2), top_n=30)["table"]
+    android = t[~t["Телефон"].str.startswith("Apple")]
+    assert len(android) and android["Почему"].str.contains("не подходит: система").all()
+
+
+def test_price_floor(pipe):
+    """Вилка 60–100 тыс.: все подходящие модели в топ-10 не дешевле 54 тыс. (−10%)."""
+    t = recommend(pipe, answers(budget_min=60000, budget_rub=100000), top_n=10)["table"]
+    assert t["Цена, ₽"].min() >= 54000
+
+
+@pytest.mark.parametrize("lo,hi,n", [(0, 100000, 3), (25000, 40000, 2), (31000, 59000, 0), (30000, 60000, 0)])
+def test_segments_split_and_borders(pipe, lo, hi, n):
+    from src.ml.recommender import recommend_by_segments
+    segs = recommend_by_segments(pipe, answers(budget_min=lo, budget_rub=hi))
+    assert len(segs) == n
+    for s in segs:  # строгие границы: сегменты не пересекаются
+        prices = s["res"]["table"]["Цена, ₽"]
+        assert prices.between(s["lo"], s["hi"]).all(), (s["title"], prices.tolist())

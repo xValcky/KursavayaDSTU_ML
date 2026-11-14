@@ -115,7 +115,7 @@ def preference_weights(a: dict) -> np.ndarray:
 
 
 # Названия жёстких требований (для подсказки «что отсекло больше всего»)
-REQUIREMENT_TITLES = {"budget": "бюджет", "os": "система", "nfc": "NFC", "esim": "eSIM — обязательно",
+REQUIREMENT_TITLES = {"budget": "бюджет", "floor": "цена от", "os": "система", "nfc": "NFC", "esim": "eSIM — обязательно",
                       "ir": "ИК-порт — обязательно", "screen": "размер экрана", "hz": "частота экрана",
                       "rom": "объём памяти"}
 
@@ -124,6 +124,7 @@ def penalty_breakdown(a: dict, phones: pd.DataFrame) -> pd.DataFrame:
     """Штрафы по каждому требованию отдельно (строка — телефон, колонка — требование)."""
     price = phones["price_rub"].to_numpy()
     ratio = price / a["budget_rub"]
+    floor = floor_price(a)
     n = len(phones)
     zero = np.zeros(n)
     os_bad = zero
@@ -136,6 +137,8 @@ def penalty_breakdown(a: dict, phones: pd.DataFrame) -> pd.DataFrame:
     miss = np.clip(lo - screen, 0, None) + np.clip(screen - hi, 0, None)
     return pd.DataFrame({
         "budget": 30.0 * np.clip(ratio - 1.0, 0, None),           # дороже бюджета — резко хуже
+        # дешевле нижней границы вилки «цена от» — так же резко хуже
+        "floor": 30.0 * np.clip(1.0 - price / floor, 0, None) if floor > 0 else zero,
         "os": 6.0 * os_bad,
         "nfc": 6.0 * (phones["nfc"].to_numpy() == 0) if a["need_nfc"] else zero,
         "esim": 6.0 * (phones["esim"].to_numpy() == 0) if a["esim_pref"] == 2 else zero,
@@ -146,10 +149,36 @@ def penalty_breakdown(a: dict, phones: pd.DataFrame) -> pd.DataFrame:
     })
 
 
+def floor_price(a: dict) -> float:
+    """Нижняя граница цены: «цена от» минус 10% (в строгом режиме сегментов — ровно «от»)."""
+    lo = float(a.get("budget_min", 0) or 0)
+    return lo if a.get("strict_range") else 0.9 * lo
+
+
 def feasible_mask(a: dict, phones: pd.DataFrame, slack: float = 1.1) -> np.ndarray:
-    """Телефоны, проходящие все жёсткие требования и не дороже бюджета более чем на 10%."""
+    """Телефоны, проходящие все жёсткие требования и не дороже бюджета более чем на 10%
+    (в строгом режиме сегментов — не дороже верхней границы)."""
+    if a.get("strict_range") and slack < 2:
+        slack = 1.0
     pen = penalty_breakdown(a, phones).drop(columns="budget")
     return (pen.sum(axis=1).to_numpy() == 0) & (phones["price_rub"].to_numpy() <= a["budget_rub"] * slack)
+
+
+# Ценовые сегменты для разбиения выдачи, если вилка «от–до» задевает несколько сегментов.
+# Граница принадлежит нижнему сегменту: 30 000 ₽ — ещё «бюджетные».
+PRICE_SEGMENTS = [(0, 30_000, "Бюджетные"), (30_000, 60_000, "Средний бюджет"), (60_000, 10**9, "Флагманы")]
+SEGMENT_MIN_OVERLAP = 3_000
+
+
+def price_segments(budget_min: float, budget_max: float) -> list[tuple[float, float, str]]:
+    """Сегменты, которые вилка задевает хотя бы на 3 000 ₽: [(от, до, название)]."""
+    out = []
+    for lo, hi, name in PRICE_SEGMENTS:
+        p_lo, p_hi = max(budget_min, lo), min(budget_max, hi)
+        if p_hi - p_lo >= SEGMENT_MIN_OVERLAP:
+            # нижний край сегмента (кроме самого первого) не включаем: 30 000 относится к «Бюджетным»
+            out.append((p_lo + (1 if p_lo == lo and lo > 0 else 0), p_hi, name))
+    return out
 
 
 def utility(a: dict, z: np.ndarray, phones: pd.DataFrame) -> np.ndarray:

@@ -9,7 +9,7 @@ import pandas as pd
 from src.ml.classifier import PhonePipeline
 from src.ml.features import FEATURE_NAMES_RU, PHONE_FEATURES, is_rugged
 from src.ml.labeling import (CLASS_NAMES, REQUIREMENT_TITLES, feasible_mask, penalty_breakdown,
-                             preference_weights, utility)
+                             preference_weights, price_segments, utility)
 
 _IDX = {f: i for i, f in enumerate(PHONE_FEATURES)}
 CLUSTER_BONUS = 0.4       # максимум мягкого бонуса кластера
@@ -109,13 +109,17 @@ def score_phones(pipe: PhonePipeline, a: dict) -> dict:
             "best_cluster": int(np.argmax(affinity)), "affinity": affinity}
 
 
-def diversify(order: np.ndarray, brands: np.ndarray, clusters: np.ndarray, n: int) -> list[int]:
-    """Разнообразие: не больше 2 моделей одного бренда в топ-5 и минимум 3 группы в топ-10."""
+def diversify(order: np.ndarray, brands: np.ndarray, clusters: np.ndarray, n: int,
+              limit_brands: bool = True) -> list[int]:
+    """Разнообразие: не больше 2 моделей одного бренда в топ-5 и минимум 3 группы в топ-10.
+
+    limit_brands=False — когда бренд задан самим требованием (система iOS = только Apple)."""
     chosen, rest = [], list(order)
     while rest and len(chosen) < n:
         pick = None
         for i in rest:
-            if len(chosen) < 5 and sum(brands[j] == brands[i] for j in chosen) >= MAX_SAME_BRAND_TOP5:
+            if (limit_brands and len(chosen) < 5
+                    and sum(brands[j] == brands[i] for j in chosen) >= MAX_SAME_BRAND_TOP5):
                 continue
             groups = {clusters[j] for j in chosen}
             if 7 <= len(chosen) < 10 and len(groups) < MIN_GROUPS_TOP10 and clusters[i] in groups:
@@ -147,12 +151,14 @@ def weak_result_hint(a: dict, phones: pd.DataFrame, feas: np.ndarray) -> dict | 
                     f"требование «{REQUIREMENT_TITLES[key]}» ({cut[key]} шт.)."}
 
 
-def _row(pipe, i, score, contrib, a, fair):
+def _row(pipe, i, score, contrib, a, fair, unmet: list[str] | None = None):
     p = pipe.phones_.iloc[i]
     top = [PHONE_FEATURES[j] for j in np.argsort(-contrib[i])[:4] if contrib[i, j] > 0]
     reasons = ", ".join(FEATURE_NAMES_RU[f] for f in top[:3])
     if p["price_rub"] > a["budget_rub"]:
         reasons += f"; дороже бюджета на {p['price_rub'] - a['budget_rub']:,.0f} ₽".replace(",", " ")
+    if unmet:
+        reasons += "; не подходит: " + ", ".join(unmet)
     fair_price = fair.get(int(p["id"])) if fair is not None else None
     return {
         "id": int(p["id"]), "Телефон": full_name(p["brand"], p["model"]),
@@ -169,38 +175,65 @@ def _row(pipe, i, score, contrib, a, fair):
         "Почему": reasons or "сбалансированный вариант",
         "_pros": plain_pros(p, top),
         "_badges": price_badges(p, fair_price),
+        "_ok": not unmet,  # проходит все жёсткие требования — при любой сортировке выше неподходящих
     }
 
 
+def unmet_requirements(a: dict, phones: pd.DataFrame) -> list[list[str]]:
+    """Для каждого телефона — какие жёсткие требования он не выполняет (для подписи «не подходит: …»)."""
+    pen = penalty_breakdown(a, phones).drop(columns="budget")
+    over = phones["price_rub"].to_numpy() > a["budget_rub"] * 1.1
+    out = []
+    for i, row in enumerate(pen.itertuples(index=False)):
+        names = [REQUIREMENT_TITLES[k] for k, v in zip(pen.columns, row) if v > 0]
+        if over[i]:
+            names.append("бюджет")
+        out.append(names)
+    return out
+
+
 def recommend(pipe: PhonePipeline, a: dict, top_n: int = 10, fair: dict | None = None,
-              diverse: bool = True) -> dict:
+              diverse: bool = True, pad: bool = True) -> dict:
     s = score_phones(pipe, a)
-    score, proba = s["score"], s["proba"]
+    score, proba, feas = s["score"], s["proba"], s["feasible"]
     pred_class = int(np.argmax(proba))
     phones = pipe.phones_
-    order = np.argsort(-score)
     brands, clusters = phones["brand"].to_numpy(), pipe.clusters_
-    picked = diversify(order, brands, clusters, top_n) if diverse else list(order[:top_n])
+    # Жёсткие требования — фильтр, а не штраф: сначала все подходящие модели, неподходящие —
+    # только если подходящих меньше, чем строк в выдаче (и с подписью, что именно не так).
+    order = np.argsort(-score, kind="stable")
+    ok = [i for i in order if feas[i]]
+    bad = [i for i in order if not feas[i]]
+    limit_brands = a.get("os_pref", 0) != 2  # iOS — это только Apple, ограничение бренда бессмысленно
+    picked = diversify(np.array(ok, dtype=int), brands, clusters, top_n, limit_brands) if diverse else ok[:top_n]
+    if pad or not picked:
+        picked += bad[:max(0, top_n - len(picked))]
+    unmet = unmet_requirements(a, phones)
     contrib = pipe.z_ * preference_weights(a)
-    table = pd.DataFrame([_row(pipe, i, score, contrib, a, fair) for i in picked])
+    table = pd.DataFrame([_row(pipe, i, score, contrib, a, fair, unmet[i]) for i in picked])
     return {
         "proba": proba, "pred_class": pred_class, "class_name": CLASS_NAMES[pred_class],
         "best_cluster": s["best_cluster"], "cluster_name": pipe.cluster_names_[s["best_cluster"]],
-        "table": table, "blocks": result_blocks(pipe, a, score, picked, contrib, fair),
+        "table": table, "blocks": result_blocks(pipe, a, score, picked, contrib, fair, feas),
         "hint": weak_result_hint(a, phones, s["feasible"]), "feasible": int(s["feasible"].sum()),
     }
 
 
-def result_blocks(pipe, a, score, picked, contrib, fair) -> list[dict]:
+def result_blocks(pipe, a, score, picked, contrib, fair, feas: np.ndarray | None = None) -> list[dict]:
     """Выдача блоками: лучший выбор, дешевле с тем же характером, премиум-альтернатива, другая группа."""
     phones = pipe.phones_
     price = phones["price_rub"].to_numpy()
+    # в блоки берём только подходящие модели (если они вообще есть)
+    allowed = feas if feas is not None and feas.any() else np.ones(len(phones), bool)
     best = picked[0]
     used = {best}
     blocks = [{"title": "Лучший выбор", "rows": [_row(pipe, best, score, contrib, a, fair)]}]
 
-    def take(mask, n, title, note):
-        cand = [i for i in np.argsort(-score) if mask[i] and i not in used][:n]
+    # премиум-блок может быть дороже бюджета до +25%, но остальные требования обязательны
+    allowed_premium = feasible_mask(a, phones, slack=1.25) if feas is not None and feas.any() else allowed
+
+    def take(mask, n, title, note, ok=allowed):
+        cand = [i for i in np.argsort(-score) if mask[i] and ok[i] and i not in used][:n]
         if cand:
             used.update(cand)
             blocks.append({"title": title, "note": note,
@@ -210,7 +243,7 @@ def result_blocks(pipe, a, score, picked, contrib, fair) -> list[dict]:
     take(same & (price <= price[best] * 0.85), 2, "Дешевле с тем же характером",
          "та же группа, цена ниже минимум на 15%")
     take((price > price[best]) & (price <= a["budget_rub"] * 1.25) & (pipe.labels_ >= pipe.labels_[best]), 2,
-         "Премиум-альтернатива", "дороже, но до +25% к бюджету")
+         "Премиум-альтернатива", "дороже, но до +25% к бюджету", ok=allowed_premium)
     top3_groups = {pipe.clusters_[i] for i in picked[:3]}
     take(~np.isin(pipe.clusters_, list(top3_groups)) & (price <= a["budget_rub"] * 1.1), 2,
          "Из другой группы", "другой характер железа")
@@ -276,3 +309,23 @@ def phone_row(pipe: PhonePipeline, phone_id: int, fair: dict | None = None) -> p
     p["badges"] = price_badges(p, fair.get(int(p["id"])) if fair else None)
     p["fair_price"] = fair.get(int(p["id"])) if fair else None
     return p
+
+
+def recommend_by_segments(pipe: PhonePipeline, a: dict, top_n: int = 10, fair: dict | None = None,
+                          diverse: bool = True) -> list[dict]:
+    """Если вилка «от–до» задевает 2+ ценовых сегмента — отдельная выдача по каждому сегменту.
+
+    Возвращает [{"title", "lo", "hi", "res"}]; пустой список — вилка лежит в одном сегменте.
+    Внутри сегмента границы строгие (без +10% к потолку), поэтому сегменты не пересекаются.
+    """
+    segs = price_segments(float(a.get("budget_min", 0) or 0), float(a["budget_rub"]))
+    if len(segs) < 2:
+        return []
+    out = []
+    for lo, hi, name in segs:
+        seg_a = {**a, "budget_min": lo, "budget_rub": hi, "strict_range": 1}
+        res = recommend(pipe, seg_a, top_n=top_n, fair=fair, diverse=diverse, pad=False)
+        hi_txt = "и дороже" if hi >= 10**9 else f"{hi:,.0f} ₽".replace(",", " ")
+        lo_txt = f"{max(lo - 1, 0) if lo % 1000 == 1 else lo:,.0f}".replace(",", " ")
+        out.append({"title": name, "range": f"{lo_txt} – {hi_txt}", "lo": lo, "hi": hi, "res": res})
+    return out

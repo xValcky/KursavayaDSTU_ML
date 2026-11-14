@@ -17,7 +17,7 @@ from src.ml.labeling import (CLASS_NAMES, HZ_PREF, IMPORTANCE_DEFAULTS, IMPORTAN
                              IMPORTANCE_TITLES, OPTION_PREF, PRESET_HINTS, PRESETS, SCREEN_PREF, SIMPLE_IMPORTANCE)
 from src.ml.price_forecast import PriceForecast, advice
 from src.ml.price_model import PriceModel
-from src.ml.recommender import explain, full_name, phone_row, recommend
+from src.ml.recommender import explain, full_name, phone_row, recommend, recommend_by_segments
 from src.providers.base import ENV_PATH, ProviderError, all_providers
 from src.ui import charts
 from src.ui.style import build_palette, build_qss
@@ -41,6 +41,7 @@ SORTS = {"по оценке": ("Оценка", False), "сначала деше�
          "дольше работают": ("Активно, ч", False), "лучше камера": ("Камера, МП", False),
          "выгоднее (к справедливой цене)": ("К справедливой, %", True)}
 CARD_STEP = 5
+MIN_PHONES = 20  # меньше — кластеризация по шпилям и обучение нейросети невозможны
 
 
 class MainWindow(QMainWindow):
@@ -112,7 +113,13 @@ class MainWindow(QMainWindow):
         (self.btn_pro if pro else self.btn_simple).setChecked(True)
         self.set_mode(pro)
         self.pipe = PhonePipeline.load()
-        if self.pipe is None or len(self.pipe.phones_) != len(self.phones):
+        if len(self.phones) < MIN_PHONES:
+            # без телефонов обучать нечего: KMeans и нейросеть упали бы
+            self.pipe = None
+            self.model_status.setText(f"В базе {len(self.phones)} моделей — для подбора нужно хотя бы {MIN_PHONES}. "
+                                      f"Импортируйте CSV на вкладке «Данные и API».")
+            self.btn_pick.setEnabled(False)
+        elif self.pipe is None or len(self.pipe.phones_) != len(self.phones):
             self.retrain()
         else:
             self.on_model_ready(self.pipe, save=False)
@@ -172,18 +179,23 @@ class MainWindow(QMainWindow):
         outer.addLayout(presets)
 
         profiles = QHBoxLayout()
-        profiles.addWidget(hint("Мои профили:"))
+        lbl = hint("Мои анкеты:")
+        tip = ("Запомните ответы опроса под именем («Мне — игры», «Маме — звонилка») и подставляйте их одним "
+               "выбором в списке. Хранятся в настройках Windows на этом компьютере.")
+        lbl.setToolTip(tip)
+        profiles.addWidget(lbl)
         self.profile_box = QComboBox()
-        self.profile_box.setMinimumWidth(200)
-        b_load = QPushButton("Загрузить")
-        b_load.clicked.connect(self.load_profile)
+        self.profile_box.setMinimumWidth(220)
+        self.profile_box.setToolTip(tip)
+        self.profile_box.setPlaceholderText("нет сохранённых — нажмите «Сохранить»")
+        self.profile_box.activated.connect(lambda _: self.load_profile())  # выбор сразу подставляет ответы
         b_save = QPushButton("Сохранить текущие ответы…")
         b_save.clicked.connect(self.save_profile)
-        b_del = QPushButton("Удалить")
-        b_del.clicked.connect(self.delete_profile)
+        self.profile_del = QPushButton("Удалить")
+        self.profile_del.clicked.connect(self.delete_profile)
         b_reset = QPushButton("Сбросить настройки")
         b_reset.clicked.connect(self.reset_survey)
-        for wdg in (self.profile_box, b_load, b_save, b_del):
+        for wdg in (self.profile_box, b_save, self.profile_del):
             profiles.addWidget(wdg)
         profiles.addStretch()
         profiles.addWidget(b_reset)
@@ -195,13 +207,27 @@ class MainWindow(QMainWindow):
         form = QFormLayout(left)
         form.setVerticalSpacing(10)
         self.req_form = form
-        self.budget = QSpinBox()
-        self.budget.setRange(5000, 300000)
-        self.budget.setSingleStep(1000)
-        self.budget.setValue(35000)
-        self.budget.setSuffix(" ₽")
-        self.budget.setGroupSeparatorShown(True)
-        form.addRow("Бюджет", self.budget)
+        self.budget_min, self.budget = QSpinBox(), QSpinBox()
+        for sb, lo, val in ((self.budget_min, 0, 0), (self.budget, 3000, 35000)):
+            sb.setRange(lo, 300000)
+            sb.setSingleStep(1000)
+            sb.setValue(val)
+            sb.setSuffix(" ₽")
+            sb.setGroupSeparatorShown(True)
+        self.budget_min.setSpecialValueText("не важно")  # 0 — нижней границы нет
+        self.budget_min.setToolTip("Нижняя граница цены. Дешевле этой цены (−10%) телефоны в подборку не попадут.")
+        self.budget.setToolTip("Бюджет — верхняя граница. Допускается превышение до 10%.")
+        price_row = QWidget()
+        pr = QHBoxLayout(price_row)
+        pr.setContentsMargins(0, 0, 0, 0)
+        pr.addWidget(hint("от"))
+        pr.addWidget(self.budget_min, 1)
+        pr.addWidget(hint("до"))
+        pr.addWidget(self.budget, 1)
+        form.addRow("Цена", price_row)
+        # нижняя граница не может быть выше верхней
+        self.budget_min.valueChanged.connect(lambda v: v > self.budget.value() and self.budget.setValue(v))
+        self.budget.valueChanged.connect(lambda v: v < self.budget_min.value() and self.budget_min.setValue(v))
         self.os_pref = QComboBox()
         self.os_pref.addItems(["Неважно", "Android", "iOS"])
         form.addRow("Система", self.os_pref)
@@ -292,6 +318,7 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(0)
         self.min_rom.setCurrentText("128")
         self.budget.setValue(35000)
+        self.budget_min.setValue(0)
         checked = self.preset_group.checkedButton()
         if checked:
             self.preset_group.setExclusive(False)
@@ -316,7 +343,8 @@ class MainWindow(QMainWindow):
 
     def answers(self) -> dict:
         a = {k: s.value() for k, s in self.sliders.items()}
-        a.update(budget_rub=float(self.budget.value()), os_pref=self.os_pref.currentIndex(),
+        a.update(budget_rub=float(self.budget.value()), budget_min=float(self.budget_min.value()),
+                 os_pref=self.os_pref.currentIndex(),
                  min_rom=int(self.min_rom.currentText()), need_nfc=int(self.need_nfc.isChecked()),
                  esim_pref=self.esim_pref.currentIndex(), ir_pref=self.ir_pref.currentIndex(),
                  screen_pref=self.screen_pref.currentIndex(), min_hz=HZ_PREF[self.min_hz.currentIndex()],
@@ -328,6 +356,7 @@ class MainWindow(QMainWindow):
         for k, s in self.sliders.items():
             s.setValue(int(a.get(k, IMPORTANCE_DEFAULTS[k])))
         self.budget.setValue(int(a.get("budget_rub", 35000)))
+        self.budget_min.setValue(int(a.get("budget_min", 0)))
         self.os_pref.setCurrentIndex(int(a.get("os_pref", 0)))
         self.min_rom.setCurrentText(str(int(a.get("min_rom", 128))))
         self.need_nfc.setChecked(bool(a.get("need_nfc", 1)))
@@ -345,12 +374,18 @@ class MainWindow(QMainWindow):
 
     def reload_profiles(self):
         self.profile_box.clear()
-        self.profile_box.addItems(sorted(self._profiles()))
+        names = sorted(self._profiles())
+        self.profile_box.addItems(names)
+        self.profile_box.setCurrentIndex(-1)  # ничего не выбрано — видна подсказка
+        self.profile_del.setEnabled(bool(names))
 
     def save_profile(self):
-        name, ok = QInputDialog.getText(self, "Профиль", "Название профиля:")
+        name, ok = QInputDialog.getText(self, "Сохранить анкету", "Название (например, «Маме — звонилка»):")
         if ok and name.strip():
             prof = self._profiles()
+            if name.strip() in prof and QMessageBox.question(
+                    self, "Анкета уже есть", f"Заменить анкету «{name.strip()}» текущими ответами?") != QMessageBox.Yes:
+                return
             prof[name.strip()] = self.answers()
             self.settings.setValue("profiles", json.dumps(prof, ensure_ascii=False))
             self.reload_profiles()
@@ -360,11 +395,17 @@ class MainWindow(QMainWindow):
         a = self._profiles().get(self.profile_box.currentText())
         if a:
             self.set_answers(a)
-            self.preset_info_text.setText(f"Загружен профиль «{self.profile_box.currentText()}».")
+            self.preset_info_text.setText(f"Подставлена анкета «{self.profile_box.currentText()}».")
 
     def delete_profile(self):
+        name = self.profile_box.currentText()
+        if not name:
+            QMessageBox.information(self, "Удалить анкету", "Сначала выберите анкету в списке.")
+            return
+        if QMessageBox.question(self, "Удалить анкету", f"Удалить анкету «{name}»?") != QMessageBox.Yes:
+            return
         prof = self._profiles()
-        prof.pop(self.profile_box.currentText(), None)
+        prof.pop(name, None)
         self.settings.setValue("profiles", json.dumps(prof, ensure_ascii=False))
         self.reload_profiles()
 
@@ -374,15 +415,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Подождите", "Модель ещё обучается.")
             return
         a = self.answers()
-        res = recommend(self.pipe, a, top_n=30, fair=self.fair, diverse=self.diverse_box.isChecked())
+        diverse = self.diverse_box.isChecked()
+        res = recommend(self.pipe, a, top_n=30, fair=self.fair, diverse=diverse)
+        # вилка задевает 2+ ценовых сегмента — выдача по каждому сегменту отдельно (по 10 моделей)
+        segs = (recommend_by_segments(self.pipe, a, top_n=10, fair=self.fair, diverse=diverse)
+                if self.segments_box.isChecked() else [])
+        best = res["table"].iloc[0]  # лучший по всей вилке — для заголовка
+        tables = [s["res"]["table"].assign(Сегмент=f"{s['title']}: {s['range']}")
+                  for s in segs if len(s["res"]["table"])]
+        res["segments"] = segs if tables else []
+        if res["segments"]:
+            t = pd.concat(tables, ignore_index=True)
+            res["table"] = t[["id", "Сегмент"] + [c for c in t.columns if c not in ("id", "Сегмент")]]
         self.last_answers, self.last_res = a, res
         self.survey_id = db.save_survey(a, res["pred_class"])
-        best = res["table"].iloc[0]
+        seg_note = (f"Вилка цены задевает {len(res['segments'])} ценовых сегмента — выдача разбита по ним. "
+                    if res["segments"] else "")
         self.result_header.setText(
             f"<span style='font-size:15pt; font-weight:600'>Вам подойдёт: {best['Телефон']}</span><br>"
-            f"<span style='color:#7A8194'>Нейросеть отнесла запрос к классу <b>{res['class_name']}</b> "
+            f"<span style='color:#9AA2B5'>Нейросеть отнесла запрос к классу <b>{res['class_name']}</b> "
             f"({res['proba'][res['pred_class']]:.0%}), ближайшая группа — <b>{res['cluster_name']}</b>. "
-            f"Подходящих под все требования моделей: {res['feasible']}. "
+            f"Подходящих под все требования моделей: {res['feasible']}. {seg_note}"
             f"Отметьте, что подошло, — это поможет дообучить модель.</span>")
         hint_ = res["hint"]
         self.hint_bar.setVisible(bool(hint_))
@@ -412,6 +465,8 @@ class MainWindow(QMainWindow):
             self.need_nfc.setChecked(False)
         elif key == "budget":
             self.budget.setValue(int(self.budget.value() * 1.3))
+        elif key == "floor":
+            self.budget_min.setValue(0)
         self.on_pick()
 
     def sorted_table(self) -> pd.DataFrame:
@@ -421,15 +476,20 @@ class MainWindow(QMainWindow):
         col, asc = SORTS[self.sort_box.currentText()]
         if col in t and t[col].notna().any():
             t = t.sort_values(col, ascending=asc, kind="stable")
+            # подходящие под требования всегда выше неподходящих (добор), при любой сортировке
+            t = t.sort_values("_ok", ascending=False, kind="stable")
+            if "Сегмент" in t:  # сегменты остаются в порядке «бюджетные → средние → флагманы»
+                order = {name: i for i, name in enumerate(dict.fromkeys(self.last_res["table"]["Сегмент"]))}
+                t = t.sort_values("Сегмент", key=lambda c: c.map(order), kind="stable")
         return t
 
     def render_results(self):
         if not self.last_res:
             return
         res = self.last_res
-        n = int(self.count_box.currentText())
         table = self.sorted_table()
-        self.result_model.set_df(table.head(n).drop(columns=["_pros", "_badges"]))
+        n = len(table) if res.get("segments") else int(self.count_box.currentText())
+        self.result_model.set_df(table.head(n).drop(columns=["_pros", "_badges", "_ok"]))
         self.result_view.setColumnHidden(0, True)
         ids = table["id"].head(n).tolist()
         charts.plot_proba(self.proba_canvas, res["proba"])
@@ -440,6 +500,20 @@ class MainWindow(QMainWindow):
         self.show_explain()
         # простой режим: блоки + «показать ещё»
         clear_layout(self.cards_layout)
+        if res.get("segments"):
+            for seg in res["segments"]:
+                rows = seg["res"]["table"]
+                note = f"{seg['range']} · подходящих моделей: {seg['res']['feasible']}"
+                self.cards_layout.addWidget(self._block_title(seg["title"], note))
+                if rows.empty:
+                    self.cards_layout.addWidget(hint("В этом сегменте под ваши требования ничего нет — "
+                                                     "ослабьте требования или сдвиньте вилку цены."))
+                for _, r in rows.iterrows():
+                    self.cards_layout.addWidget(self._card(r))
+            self.more_rows, self.cards_shown = [], 0
+            self.more_btn.setEnabled(False)
+            self.cards_layout.addStretch()
+            return
         shown = set()
         for block in res["blocks"]:
             self.cards_layout.addWidget(self._block_title(block["title"], block.get("note", "")))
@@ -501,6 +575,11 @@ class MainWindow(QMainWindow):
         self.diverse_box = QCheckBox("Разнообразие выдачи (≤ 2 модели бренда в топ-5, ≥ 3 группы в топ-10)")
         self.diverse_box.setChecked(True)
         self.diverse_box.toggled.connect(lambda _: self.last_res and self.on_pick())
+        self.segments_box = QCheckBox("Разбить по ценовым сегментам")
+        self.segments_box.setToolTip("Если вилка цены задевает несколько сегментов (до 30 тыс., 30–60 тыс., от 60 тыс.), "
+                                     "показать по 10 лучших в каждом")
+        self.segments_box.setChecked(True)
+        self.segments_box.toggled.connect(lambda _: self.last_res and self.on_pick())
         self.count_box = QComboBox()
         self.count_box.addItems(["10", "20", "30"])
         self.count_box.currentIndexChanged.connect(lambda _: self.render_results())
@@ -510,6 +589,7 @@ class MainWindow(QMainWindow):
         b_export = QPushButton("Экспорт подборки…")
         b_export.clicked.connect(self.export_selection)
         controls.addWidget(self.diverse_box)
+        controls.addWidget(self.segments_box)
         controls.addStretch()
         controls.addWidget(hint("Сортировка:"))
         controls.addWidget(self.sort_box)
@@ -653,7 +733,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить подборку", "подборка.xlsx", "Excel (*.xlsx);;CSV (*.csv)")
         if not path:
             return
-        table = self.sorted_table().drop(columns=["_pros", "_badges", "id"])
+        table = self.sorted_table().drop(columns=["_pros", "_badges", "_ok", "id"])
         if path.lower().endswith(".csv"):
             table.to_csv(path, index=False, encoding="utf-8-sig")
         else:

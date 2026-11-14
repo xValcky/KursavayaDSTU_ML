@@ -39,6 +39,8 @@ class PandasModel(QAbstractTableModel):
             col = self.df.columns[index.column()]
             if col in FLAG_COLUMNS:
                 return "✓" if v else "—"
+            if v is None or (isinstance(v, (float, np.floating)) and np.isnan(v)):
+                return "—"  # например, справедливая цена ещё считается
             if isinstance(v, (float, np.floating)):
                 if float(v).is_integer():
                     return f"{v:,.0f}".replace(",", " ")
@@ -316,7 +318,10 @@ def clear_layout(layout):
 
 # ---------- «Похожие» ----------
 class SimilarDialog(QDialog):
-    """Окно телефона с подборкой похожих по выбранному параметру."""
+    """Окно телефона с подборкой похожих по выбранному параметру.
+
+    Телефон можно сменить поиском по названию или переходом к соседу; «Назад / Вперёд» —
+    по истории просмотра, клик по карточке соседа — все его характеристики."""
 
     def __init__(self, pipe, phone_id: int, parent=None, by: str = "all", fair: dict | None = None,
                  history_fn=None, advice_fn=None, on_favorite=None, favorites=None):
@@ -325,9 +330,25 @@ class SimilarDialog(QDialog):
         self.history_fn, self.advice_fn = history_fn, advice_fn
         self.on_favorite, self.favorites = on_favorite, favorites if favorites is not None else set()
         self.setWindowTitle("Похожие телефоны")
-        self.resize(1040, 820)
+        self.resize(1040, 860)
+        self.back_stack, self.fwd_stack = [], []
+        self.phone_id = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 16, 16, 16)
+        nav = QHBoxLayout()
+        self.b_back, self.b_fwd = QPushButton("← Назад"), QPushButton("Вперёд →")
+        self.b_back.clicked.connect(self.go_back)
+        self.b_fwd.clicked.connect(self.go_forward)
+        nav.addWidget(self.b_back)
+        nav.addWidget(self.b_fwd)
+        nav.addSpacing(12)
+        nav.addWidget(QLabel("Телефон:"))
+        self.picker = phone_picker(pipe)
+        self.picker.setMinimumWidth(320)
+        self.picker.setToolTip("Начните вводить название, например «15 pro»")
+        self.picker.activated.connect(lambda i: self.show_phone(self.picker.itemData(i)))
+        nav.addWidget(self.picker, 1)
+        lay.addLayout(nav)
         top = QHBoxLayout()
         self.head = QVBoxLayout()
         top.addLayout(self.head, 3)
@@ -362,11 +383,22 @@ class SimilarDialog(QDialog):
         lay.addWidget(scroll, 1)
         self.show_phone(phone_id)
 
-    def show_phone(self, phone_id: int):
+    def show_phone(self, phone_id: int, record: bool = True):
+        if phone_id is None:
+            return
+        phone_id = int(phone_id)
+        if record and self.phone_id is not None and phone_id != self.phone_id:
+            self.back_stack.append(self.phone_id)
+            self.fwd_stack.clear()
         self.phone_id = phone_id
+        self.b_back.setEnabled(bool(self.back_stack))
+        self.b_fwd.setEnabled(bool(self.fwd_stack))
+        self.picker.blockSignals(True)
+        self.picker.setCurrentIndex(max(0, self.picker.findData(phone_id)))
+        self.picker.blockSignals(False)
         clear_layout(self.head)
         p0 = phone_row(self.pipe, phone_id, self.fair)
-        self.head.addWidget(PhoneCard(p0, badge="Выбранный телефон", on_favorite=self.on_favorite,
+        self.head.addWidget(PhoneCard(p0, badge="Сейчас смотрите", on_favorite=self.on_favorite,
                                       is_favorite=str(p0["model"]) in self.favorites))
         if self.history_fn:
             hist = self.history_fn(phone_id)
@@ -382,8 +414,26 @@ class SimilarDialog(QDialog):
             if r.get("К справедливой"):
                 note += f", к справедливой {r['К справедливой']}"
             card = PhoneCard(p, compact=True, on_similar=self.show_phone, note=note, on_favorite=self.on_favorite,
-                             is_favorite=str(p["model"]) in self.favorites)
+                             is_favorite=str(p["model"]) in self.favorites, on_details=self.open_specs)
             self.grid.addWidget(card, k // 2, k % 2)
+
+    def go_back(self):
+        if self.back_stack:
+            self.fwd_stack.append(self.phone_id)
+            self.show_phone(self.back_stack.pop(), record=False)
+
+    def go_forward(self):
+        if self.fwd_stack:
+            self.back_stack.append(self.phone_id)
+            self.show_phone(self.fwd_stack.pop(), record=False)
+
+    def open_specs(self, phone_id: int):
+        """Все характеристики соседа; «Похожие» в этом окне переключают подборку на него."""
+        p = phone_row(self.pipe, phone_id, self.fair)
+        hist = self.history_fn(phone_id) if self.history_fn else None
+        SpecsDialog(p, self, history=hist, advice_text=self.advice_fn(phone_id, hist) if self.advice_fn else None,
+                    on_similar=self.show_phone, on_favorite=self.on_favorite,
+                    is_favorite=str(p["model"]) in self.favorites).exec()
 
 
 # ---------- «Дуэль» ----------

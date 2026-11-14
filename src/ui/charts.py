@@ -93,7 +93,12 @@ def _percentile_profile(pipe) -> pd.DataFrame:
 
 def _radar_axes(canvas, n):
     canvas.fig.clear()
-    return canvas.fig.add_subplot(111, projection="polar"), np.linspace(0, 2 * np.pi, n, endpoint=False)
+    # холст создаётся до применения тёмной темы: без явного фона фигура остаётся белой,
+    # а подписи рисуются светлым цветом темы и сливаются с фоном
+    canvas.fig.set_facecolor(CARD_BG)
+    ax = canvas.fig.add_subplot(111, projection="polar")
+    ax.set_facecolor(CARD_BG)
+    return ax, np.linspace(0, 2 * np.pi, n, endpoint=False)
 
 
 def _style_radar(ax, angles, labels):
@@ -133,7 +138,7 @@ def plot_reco_radar(canvas: MplCanvas, pipe, phone_ids, top=3, title="Топ-3: 
         v = ranks.iloc[i].to_numpy()
         ax.plot(np.append(angles, angles[0]), np.append(v, v[0]), color=PALETTE[k], lw=2,
                 label=full_name(df.iloc[i]["brand"], df.iloc[i]["model"]))
-        ax.fill(angles, v, color=PALETTE[k], alpha=0.12)
+        ax.fill(angles, v, color=PALETTE[k], alpha=0.18)
     _style_radar(ax, angles, labels)
     ax.set_title(title)
     ax.legend(loc="center left", bbox_to_anchor=(1.15, 0.5), fontsize=9)
@@ -208,7 +213,7 @@ def plot_cluster_radar(canvas: MplCanvas, pipe, top: int = 6):
         v = row.to_numpy()
         ax.plot(np.append(angles, angles[0]), np.append(v, v[0]), color=cluster_color(c), lw=2,
                 label=pipe.cluster_names_[c])
-        ax.fill(angles, v, color=cluster_color(c), alpha=0.08)
+        ax.fill(angles, v, color=cluster_color(c), alpha=0.12)
     _style_radar(ax, angles, labels)
     ax.set_title(f"Профили {len(prof)} крупнейших групп")
     ax.legend(loc="center left", bbox_to_anchor=(1.08, 0.5), fontsize=8)
