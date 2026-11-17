@@ -42,13 +42,17 @@ class PriceProvider(ABC):
 
     def match_prices(self, phones) -> dict[int, float]:
         """Сопоставление товаров магазина с моделями из БД по нормализованному названию."""
-        offers = [(normalize(title), price) for title, price in self.fetch_offers() if price]
+        keys = [(normalize(m), int(i)) for m, i in zip(phones["model"], phones["id"]) if normalize(m)]
         found = {}
-        for _, p in phones.iterrows():
-            key = normalize(p["model"])
-            prices = [price for title, price in offers if key and key in title]
-            if prices:
-                found[int(p["id"])] = min(prices)
+        for title, price in self.fetch_offers():
+            if not price:
+                continue
+            t = normalize(title)
+            # товар относится к самой длинной подходящей модели: «Galaxy S25 Ultra» — не к «Galaxy S25»
+            hits = [(len(k), pid) for k, pid in keys if k in t]
+            if hits:
+                pid = max(hits)[1]
+                found[pid] = min(found.get(pid, price), price)
         return found
 
 

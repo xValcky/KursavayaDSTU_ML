@@ -10,23 +10,7 @@ from src.ml.price_forecast import advice
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-# ---------- вилка цены: ввод с клавиатуры ----------
-@pytest.fixture(scope="module")
-def window():
-    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
-    from PySide6.QtCore import QThreadPool
-
-    from src.paths import ensure_runtime_files
-    ensure_runtime_files()
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    from src.ui.main_window import MainWindow
-    w = MainWindow()
-    yield w
-    QThreadPool.globalInstance().waitForDone(120_000)  # дождаться фонового обучения, чтобы не рвать сигналы
-    w.close()
-    app.processEvents()
-
-
+# ---------- вилка цены: ввод с клавиатуры (окно — фикстура window из conftest.py, изолировано) ----------
 def _type(sb, text, commit=True):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest

@@ -454,6 +454,16 @@ DUEL_ROWS = [("price_rub", "Цена, ₽", -1), ("antutu_k", "Производ�
              ("weight_g", "Вес, г", -1), ("year", "Год", 1)]
 
 
+def game_predictions(pipe):
+    """Ответы нейросети-соперника для «Угадай класс»: кросс-валидация, свой телефон сеть не видела.
+    5 обучений MLP — несколько секунд, поэтому окно вызывает это в фоновой задаче."""
+    from sklearn.model_selection import cross_val_predict
+    from sklearn.neural_network import MLPClassifier
+    mlp = MLPClassifier(hidden_layer_sizes=(32,), max_iter=2000, random_state=0)
+    cv = max(2, min(5, int(np.bincount(pipe.labels_).min())))  # в маленькой базе класс может быть < 5 моделей
+    return pipe, cross_val_predict(mlp, pipe.z_, pipe.labels_, cv=cv)
+
+
 def phone_picker(pipe) -> QComboBox:
     box = QComboBox()
     box.setEditable(True)
@@ -558,12 +568,10 @@ class GuessGame(QWidget):
         lay.addWidget(self.result)
         lay.addStretch()
 
-    def set_pipe(self, pipe):
-        from sklearn.model_selection import cross_val_predict
-        from sklearn.neural_network import MLPClassifier
+    def set_pipe(self, pipe, nn_pred=None):
+        """nn_pred — готовые ответы соперника (game_predictions в фоне); без них считаются здесь."""
         self.pipe = pipe
-        mlp = MLPClassifier(hidden_layer_sizes=(32,), max_iter=2000, random_state=0)
-        self.nn_pred = cross_val_predict(mlp, pipe.z_, pipe.labels_, cv=5)
+        self.nn_pred = nn_pred if nn_pred is not None else game_predictions(pipe)[1]
         self.you = self.nn = self.rounds = 0
         self.next_phone()
 

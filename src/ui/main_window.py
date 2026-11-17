@@ -22,7 +22,8 @@ from src.providers.base import ENV_PATH, ProviderError, all_providers
 from src.ui import charts
 from src.ui.style import build_palette, build_qss
 from src.ui.widgets import (DUEL_ROWS, DuelWidget, GuessGame, PandasModel, PhoneCard, SandboxWidget, SimilarDialog,
-                            SpecsDialog, Task, clear_layout, hint, make_table, page, pool, selected_id, split)
+                            SpecsDialog, Task, clear_layout, game_predictions, hint, make_table, page, pool,
+                            selected_id, split)
 
 CATALOG_COLUMNS = {
     "id": "id", "brand": "Бренд", "model": "Модель", "price_rub": "Цена, ₽", "os": "ОС", "year": "Год",
@@ -44,6 +45,15 @@ CARD_STEP = 5
 MIN_PHONES = 20  # меньше — кластеризация по шпилям и обучение нейросети невозможны
 
 
+def _json_setting(settings: QSettings, key: str, default):
+    """JSON из настроек; битое или чужого типа значение не роняет запуск, а заменяется пустым."""
+    try:
+        value = json.loads(settings.value(key, json.dumps(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -59,7 +69,7 @@ class MainWindow(QMainWindow):
         self.last_answers: dict | None = None
         self.last_res: dict | None = None
         self.cards_shown = 0
-        self.favorites: set[str] = set(json.loads(self.settings.value("favorites", "[]")))
+        self.favorites: set[str] = set(_json_setting(self.settings, "favorites", []))
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
@@ -369,14 +379,15 @@ class MainWindow(QMainWindow):
         self.esim_pref.setCurrentIndex(int(a.get("esim_pref", 0)))
         self.ir_pref.setCurrentIndex(int(a.get("ir_pref", 0)))
         self.screen_pref.setCurrentIndex(int(a.get("screen_pref", 0)))
-        self.min_hz.setCurrentIndex(HZ_PREF.index(int(a.get("min_hz", 0))))
+        hz = int(a.get("min_hz", 0))  # значение вне списка (старая/ручная анкета) — ближайшее не выше
+        self.min_hz.setCurrentIndex(max(i for i, v in enumerate(HZ_PREF) if v <= max(hz, 0)))
         self.gaming.setChecked(bool(a.get("gaming")))
         self.photo.setChecked(bool(a.get("photo")))
         self.work.setChecked(bool(a.get("work")))
 
     # --- профили
     def _profiles(self) -> dict:
-        return json.loads(self.settings.value("profiles", "{}"))
+        return _json_setting(self.settings, "profiles", {})
 
     def reload_profiles(self):
         self.profile_box.clear()
@@ -399,8 +410,12 @@ class MainWindow(QMainWindow):
 
     def load_profile(self):
         a = self._profiles().get(self.profile_box.currentText())
-        if a:
-            self.set_answers(a)
+        if isinstance(a, dict) and a:
+            try:
+                self.set_answers(a)
+            except (TypeError, ValueError):
+                QMessageBox.warning(self, "Анкета", "Анкета повреждена — подставлено то, что удалось прочитать.")
+                return
             self.preset_info_text.setText(f"Подставлена анкета «{self.profile_box.currentText()}».")
 
     def delete_profile(self):
@@ -416,16 +431,31 @@ class MainWindow(QMainWindow):
         self.reload_profiles()
 
     # ===== Подбор =====
-    def on_pick(self):
+    def on_pick(self, *_, refresh: bool = False):
+        """Подбор. refresh=True — пересчёт прошлой анкеты (готовы справедливые цены, переключили
+        «разнообразие» / «сегменты»): без новой записи анкеты в БД и без перехода на вкладку."""
         if self.pipe is None:
             QMessageBox.information(self, "Подождите", "Модель ещё обучается.")
             return
-        a = self.answers()
+        if refresh and self.last_answers is None:
+            return
+        a = self.last_answers if refresh else self.answers()
         diverse = self.diverse_box.isChecked()
         res = recommend(self.pipe, a, top_n=30, fair=self.fair, diverse=diverse)
         # вилка задевает 2+ ценовых сегмента — выдача по каждому сегменту отдельно (по 10 моделей)
         segs = (recommend_by_segments(self.pipe, a, top_n=10, fair=self.fair, diverse=diverse)
                 if self.segments_box.isChecked() else [])
+        # модели, отправленные в архив после обучения, в выдачу не попадают (переобучение не обязательно)
+        archived = set(self.phones_all.loc[self.phones_all["archived"].fillna(0) == 1, "id"].astype(int))
+        if archived:
+            for r in [res] + [seg["res"] for seg in segs]:
+                r["table"] = r["table"][~r["table"]["id"].isin(archived)].reset_index(drop=True)
+            res["blocks"] = [{**b, "rows": [row for row in b["rows"] if int(row["id"]) not in archived]}
+                             for b in res["blocks"]]
+            res["blocks"] = [b for b in res["blocks"] if b["rows"]]
+        if res["table"].empty:
+            QMessageBox.information(self, "Подбор", "Под эти условия в базе нет ни одной модели.")
+            return
         best = res["table"].iloc[0]  # лучший по всей вилке — для заголовка
         tables = [s["res"]["table"].assign(Сегмент=f"{s['title']}: {s['range']}")
                   for s in segs if len(s["res"]["table"])]
@@ -434,7 +464,8 @@ class MainWindow(QMainWindow):
             t = pd.concat(tables, ignore_index=True)
             res["table"] = t[["id", "Сегмент"] + [c for c in t.columns if c not in ("id", "Сегмент")]]
         self.last_answers, self.last_res = a, res
-        self.survey_id = db.save_survey(a, res["pred_class"])
+        if not refresh or self.survey_id is None:
+            self.survey_id = db.save_survey(a, res["pred_class"])
         seg_note = (f"Вилка цены задевает {len(res['segments'])} ценовых сегмента — выдача разбита по ним. "
                     if res["segments"] else "")
         self.result_header.setText(
@@ -450,7 +481,8 @@ class MainWindow(QMainWindow):
             self.hint_btn.setVisible(hint_["key"] != "budget" or "Самый дешёвый" in hint_["text"])
             self.hint_btn.setText("Поднять бюджет" if hint_["key"] == "budget" else "Ослабить это требование")
         self.render_results()
-        self.tabs.setCurrentIndex(TAB_RESULT)
+        if not refresh:
+            self.tabs.setCurrentIndex(TAB_RESULT)
 
     def relax_requirement(self):
         key = (self.last_res or {}).get("hint", {}) or {}
@@ -580,12 +612,12 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         self.diverse_box = QCheckBox("Разнообразие выдачи (≤ 2 модели бренда в топ-5, ≥ 3 группы в топ-10)")
         self.diverse_box.setChecked(True)
-        self.diverse_box.toggled.connect(lambda _: self.last_res and self.on_pick())
+        self.diverse_box.toggled.connect(lambda _: self.last_res and self.on_pick(refresh=True))
         self.segments_box = QCheckBox("Разбить по ценовым сегментам")
         self.segments_box.setToolTip("Если вилка цены задевает несколько сегментов (до 30 тыс., 30–60 тыс., от 60 тыс.), "
                                      "показать по 10 лучших в каждом")
         self.segments_box.setChecked(True)
-        self.segments_box.toggled.connect(lambda _: self.last_res and self.on_pick())
+        self.segments_box.toggled.connect(lambda _: self.last_res and self.on_pick(refresh=True))
         self.count_box = QComboBox()
         self.count_box.addItems(["10", "20", "30"])
         self.count_box.currentIndexChanged.connect(lambda _: self.render_results())
@@ -725,10 +757,19 @@ class MainWindow(QMainWindow):
 
     def duel_with_best(self):
         pid = selected_id(self.result_view, self.result_model)
-        if pid is None or self.result_model.df.empty:
+        if pid is None or self.result_model.df.empty or not self.last_res:
+            QMessageBox.information(self, "Дуэль", "Сначала выделите строку с телефоном.")
             return
-        best = int(self.result_model.df.iloc[0]["id"])
-        other = pid if pid != best else int(self.result_model.df.iloc[1]["id"])
+        ranked = [int(i) for i in self.last_res["table"]["id"]]  # порядок выдачи, а не клика по заголовку
+        best = ranked[0]
+        others = [i for i in ranked if i != best]
+        if pid != best:
+            other = pid
+        elif others:
+            other = others[0]
+        else:
+            QMessageBox.information(self, "Дуэль", "В выдаче одна модель — сравнивать не с чем.")
+            return
         self.duel.set_pipe(self.pipe, best, other)
         self.tabs.setCurrentIndex(TAB_FUN)
         self.fun_tabs.setCurrentIndex(0)
@@ -744,13 +785,22 @@ class MainWindow(QMainWindow):
         if path.lower().endswith(".csv"):
             table.to_csv(path, index=False, encoding="utf-8-sig")
         else:
-            blocks = pd.DataFrame([{"блок": b["title"], "телефон": r["Телефон"], "цена, ₽": r["Цена, ₽"],
-                                    "почему": r["Почему"]} for b in self.last_res["blocks"] for r in b["rows"]])
+            if self.last_res.get("segments"):  # на экране — сегменты, их и выгружаем
+                shown = [(seg["title"], r) for seg in self.last_res["segments"]
+                         for _, r in seg["res"]["table"].iterrows()]
+            else:
+                shown = [(b["title"], r) for b in self.last_res["blocks"] for r in b["rows"]]
+            blocks = pd.DataFrame([{"блок": title, "телефон": r["Телефон"], "цена, ₽": r["Цена, ₽"],
+                                    "почему": r["Почему"]} for title, r in shown])
             answers = pd.DataFrame([{"параметр": k, "значение": v} for k, v in self.last_answers.items()])
-            with pd.ExcelWriter(path, engine="openpyxl") as xl:
-                blocks.to_excel(xl, sheet_name="Блоки", index=False)
-                table.to_excel(xl, sheet_name="Топ", index=False)
-                answers.to_excel(xl, sheet_name="Ответы", index=False)
+            try:
+                with pd.ExcelWriter(path, engine="openpyxl") as xl:
+                    blocks.to_excel(xl, sheet_name="Блоки", index=False)
+                    table.to_excel(xl, sheet_name="Топ", index=False)
+                    answers.to_excel(xl, sheet_name="Ответы", index=False)
+            except OSError as e:  # файл открыт в Excel и т.п.
+                QMessageBox.warning(self, "Экспорт", f"Не удалось сохранить файл (открыт в Excel?):\n{e}")
+                return
         self.statusBar().showMessage(f"Подборка сохранена: {path}", 6000)
 
     # ===== Избранное =====
@@ -760,7 +810,10 @@ class MainWindow(QMainWindow):
         else:
             self.favorites.add(model)
         self.settings.setValue("favorites", json.dumps(sorted(self.favorites), ensure_ascii=False))
-        self.statusBar().showMessage(f"В избранном: {len(self.favorites)}", 3000)
+        action = "добавлен в избранное" if model in self.favorites else "убран из избранного"
+        self.statusBar().showMessage(f"{model} {action}. В избранном: {len(self.favorites)}", 4000)
+        if self.tabs.currentIndex() == TAB_FAV:
+            self.refresh_favorites()  # карточка убранной модели не должна оставаться на экране
 
     def favorite_by_id(self, phone_id: int):
         self.toggle_favorite(str(self.pipe.phones_.loc[self.pipe.phones_["id"] == phone_id, "model"].iloc[0]))
@@ -803,7 +856,7 @@ class MainWindow(QMainWindow):
             return
         for k, (_, p) in enumerate(fav.iterrows()):
             card = PhoneCard(phone_row(self.pipe, int(p["id"]), self.fair), compact=True, on_similar=self.open_similar,
-                             on_favorite=self.toggle_favorite, is_favorite=True)
+                             on_favorite=self.toggle_favorite, is_favorite=True, on_details=self.open_specs)
             self.fav_cards.addWidget(card, k // 3, k % 3)
         rows = []
         names = [full_name(b, m) for b, m in zip(fav["brand"], fav["model"])]
@@ -812,7 +865,10 @@ class MainWindow(QMainWindow):
             row = {"параметр": title}
             row.update({n: (f"{v:,.0f}".replace(",", " ") if v >= 1000 else f"{v:g}") for n, v in zip(names, vals)})
             if sign:
-                row["лучший"] = names[int(np.argmax(vals * sign))]
+                score = vals * sign
+                leaders = [n for n, v in zip(names, score) if v == score.max()]
+                row["лучший"] = ("одинаково" if len(leaders) == len(names)
+                                 else leaders[0] if len(leaders) == 1 else "ничья: " + ", ".join(leaders))
             rows.append(row)
         if self.fair:
             row = {"параметр": "К справедливой цене"}
@@ -1133,6 +1189,7 @@ class MainWindow(QMainWindow):
         return w
 
     def train_sandbox(self, params: dict):
+        self.btn_retrain.setEnabled(False)  # два обучения одновременно перезаписывали бы друг друга
         # слоты — методы окна (а не lambda), чтобы Qt выполнил их в главном потоке
         task = Task(lambda: (params, PhonePipeline(**params).fit(self.phones, db.get_liked_feedback(),
                                                                   db.get_liked_feedback(False))))
@@ -1142,6 +1199,7 @@ class MainWindow(QMainWindow):
 
     def _sandbox_error(self, msg: str):
         self.sandbox.reset_button()
+        self.btn_retrain.setEnabled(True)
         self.on_error(msg)
 
     def _sandbox_done(self, result):
@@ -1159,6 +1217,7 @@ class MainWindow(QMainWindow):
     def retrain(self):
         self.btn_pick.setEnabled(False)
         self.btn_retrain.setEnabled(False)
+        self.sandbox.btn.setEnabled(False)
         self.model_status.setText("Обучаем модель: метки → группы по шпилям → нейросеть…")
         task = Task(lambda: PhonePipeline().fit(self.phones, db.get_liked_feedback(), db.get_liked_feedback(False)))
         task.signals.done.connect(self.on_model_ready)
@@ -1171,14 +1230,23 @@ class MainWindow(QMainWindow):
             pipe.save()
         self.btn_pick.setEnabled(True)
         self.btn_retrain.setEnabled(True)
+        self.sandbox.btn.setEnabled(True)
         t = pipe.metrics_["test"]
         self.model_status.setText(f"Модель готова · точность {t['accuracy']:.0%} · "
                                   f"{len(pipe.phones_)} телефонов в {pipe.k_} группах")
         self.refresh_analytics()
         self.refresh_catalog()
         self.duel.set_pipe(pipe)
-        self.game.set_pipe(pipe)
+        task = Task(game_predictions, pipe)  # 5 обучений нейросети для игры — не в главном потоке
+        task.signals.done.connect(self._on_game_ready)
+        task.signals.error.connect(self.on_error)
+        pool().start(task)
         self.start_aux()
+
+    def _on_game_ready(self, result):
+        pipe, pred = result
+        if pipe is self.pipe:  # пока считали, модель могли сменить — устаревший ответ не нужен
+            self.game.set_pipe(pipe, pred)
 
     def start_aux(self):
         """Справедливая цена и прогноз цен — фоном, после основной модели."""
@@ -1205,7 +1273,7 @@ class MainWindow(QMainWindow):
         self.refresh_aux()
         self.refresh_catalog()
         if self.last_res:
-            self.on_pick()
+            self.on_pick(refresh=True)  # пересчитать со справедливыми ценами, не создавая новую анкету
         self.statusBar().showMessage("Справедливые цены и прогноз готовы.", 4000)
         if self.exp is None and self.btn_exp.isEnabled():
             self.run_experiments()  # чтобы вкладки «Сравнение моделей» и «Ансамбли» не были пустыми
@@ -1227,13 +1295,22 @@ class MainWindow(QMainWindow):
         self.refresh_experiments()
 
     def export_report(self):
-        path = experiments.export_excel(self.exp, self.price_model, self.forecast)
+        if not self.exp and self.price_model is None and self.forecast is None:
+            QMessageBox.information(self, "Экспорт", "Экспортировать пока нечего: эксперименты и модель цены "
+                                                     "ещё считаются. Попробуйте через пару минут.")
+            return
+        try:
+            path = experiments.export_excel(self.exp, self.price_model, self.forecast)
+        except OSError as e:
+            QMessageBox.warning(self, "Экспорт", f"Не удалось сохранить отчёт (файл открыт в Excel?):\n{e}")
+            return
         QMessageBox.information(self, "Экспорт", f"Все таблицы экспериментов сохранены:\n{path}")
 
     def on_error(self, msg: str):
         self.btn_pick.setEnabled(self.pipe is not None)
         self.btn_retrain.setEnabled(True)
         self.btn_exp.setEnabled(True)
+        self.sandbox.btn.setEnabled(True)
         QMessageBox.critical(self, "Ошибка", msg[:3000])
 
     # ===== Данные и API =====
@@ -1258,7 +1335,7 @@ class MainWindow(QMainWindow):
                          "Без ключей используется локальная база."))
         b_save = QPushButton("Сохранить ключи")
         b_save.clicked.connect(self.save_keys)
-        b_prices = QPushButton("Обновить цены")
+        b_prices = self.b_prices = QPushButton("Обновить цены")
         b_prices.clicked.connect(self.update_prices)
         btns = QHBoxLayout()
         btns.addWidget(b_save)
@@ -1293,8 +1370,19 @@ class MainWindow(QMainWindow):
         return {k.strip(): v.strip() for k, v in pairs}
 
     def save_keys(self):
-        ENV_PATH.write_text("\n".join(f"{k}={e.text().strip()}" for k, e in self.key_edits.items()) + "\n",
-                            encoding="utf-8")
+        """Обновить только наши ключи; комментарии и другие переменные в .env сохраняются."""
+        values = {k: e.text().strip().replace("\n", "") for k, e in self.key_edits.items()}
+        lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+        out, done = [], set()
+        for line in lines:
+            k = line.split("=", 1)[0].strip()
+            if "=" in line and not line.lstrip().startswith("#") and k in values:
+                out.append(f"{k}={values[k]}")
+                done.add(k)
+            else:
+                out.append(line)
+        out += [f"{k}={v}" for k, v in values.items() if k not in done]
+        ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
         self.log.append("Ключи сохранены в .env")
 
     def update_prices(self):
@@ -1302,15 +1390,36 @@ class MainWindow(QMainWindow):
         if not providers:
             self.log.append("Ключи не заполнены — цены остаются из локальной базы.")
             return
-        for prov in providers:
-            try:
-                found = prov.match_prices(self.phones)
-            except ProviderError as e:
-                self.log.append(f"Не удалось: {e}")
+        phones = self.phones.copy()
+
+        def work():  # сеть — в фоне, иначе окно «не отвечает», пока идут запросы
+            out = []
+            for prov in providers:
+                try:
+                    out.append((prov.name, prov.match_prices(phones), None))
+                except ProviderError as e:
+                    out.append((prov.name, {}, str(e)))
+            return out
+        self.log.append("Запрашиваю цены у магазинов…")
+        self.b_prices.setEnabled(False)
+        task = Task(work)
+        task.signals.done.connect(self._on_prices_fetched)
+        task.signals.error.connect(self._on_prices_error)
+        pool().start(task)
+
+    def _on_prices_error(self, msg: str):
+        self.b_prices.setEnabled(True)
+        self.log.append(f"Не удалось обновить цены: {msg.splitlines()[0]}")
+
+    def _on_prices_fetched(self, results):
+        self.b_prices.setEnabled(True)
+        for name, found, err in results:
+            if err:
+                self.log.append(f"{name}: не удалось — {err}")
                 continue
             for phone_id, price in found.items():
-                db.update_price(phone_id, price, prov.name)
-            self.log.append(f"{prov.name}: обновлено цен — {len(found)}")
+                db.update_price(phone_id, price, name)
+            self.log.append(f"{name}: обновлено цен — {len(found)}")
         self.reload_phones()
         self.refresh_catalog()
         self.refresh_db_stats()

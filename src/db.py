@@ -94,6 +94,10 @@ def clean_phone_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     report = check_data_quality(df, NUMERIC_COLS, CATEGORY_VALUES)
     df = drop_invalid(df, numeric_cols=NUMERIC_COLS, category_values=CATEGORY_VALUES)
     df = handle_missing(df, "dropnan", columns=["brand", "model", "price_rub"])
+    # цена ≤ 0 — опечатка или заглушка: log(цены) в модели справедливой цены дал бы NaN и ошибку при запуске
+    bad_price = df["price_rub"] <= 0
+    report["bad_price"] = df.loc[bad_price, "model"].astype(str).tolist()[:10]
+    df = df[~bad_price]
     df = handle_missing(df, "mean", columns=[c for c in NUMERIC_COLS if c in df.columns])
     return estimate_autonomy(df), report
 
@@ -159,15 +163,41 @@ def init_db() -> None:
         conn.execute("ANALYZE")  # обновить статистику для планировщика запросов
 
 
+REQUIRED_COLS = ["brand", "model", "os", "price_rub"]
+
+
+def read_phone_csv(path: str) -> pd.DataFrame:
+    """CSV из Excel бывает в cp1251 и с разделителем «;» — пробуем UTF-8, затем cp1251; разделитель угадываем."""
+    last = None
+    for enc in ("utf-8-sig", "cp1251"):
+        try:
+            return pd.read_csv(path, sep=None, engine="python", encoding=enc)
+        except UnicodeDecodeError as e:
+            last = e
+    raise ValueError(f"Не удалось прочитать файл: неизвестная кодировка ({last}). Сохраните CSV в UTF-8.")
+
+
 def import_csv(path: str) -> tuple[int, dict]:
-    df = pd.read_csv(path).drop(columns=["price_source"], errors="ignore")
-    _, report = clean_phone_frame(df)
+    df = read_phone_csv(path).drop(columns=["price_source"], errors="ignore")
+    df.columns = [str(c).strip() for c in df.columns]
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"В файле нет обязательных колонок: {', '.join(missing)}. "
+                         f"Нужны как минимум: {', '.join(REQUIRED_COLS)} (остальные характеристики — по возможности).")
+    medians = pd.read_csv(SEED_PATH, usecols=NUMERIC_COLS).median()
+    for col in NUMERIC_COLS:  # колонки нет совсем — типичное значение из встроенной базы
+        if col not in df.columns:
+            df[col] = medians[col]
+    cleaned, report = clean_phone_frame(df)
+    if cleaned.empty:
+        raise ValueError("После проверки не осталось ни одной корректной строки (цена > 0, бренд и модель заданы).")
     return upsert_phones(df, f"csv:{Path(path).name}"), report
 
 
 def get_phones(include_archived: bool = False) -> pd.DataFrame:
     """Телефоны для подбора. Архивные (сняты с продажи) по умолчанию не показываются."""
-    where = "" if include_archived else "WHERE COALESCE(archived, 0) = 0"
+    # цена ≤ 0 могла попасть в базу из старого импорта CSV — такие строки в подбор и модели не отдаём
+    where = "WHERE price_rub > 0" + ("" if include_archived else " AND COALESCE(archived, 0) = 0")
     with connect() as conn:
         return pd.read_sql_query(f"SELECT * FROM phones {where} ORDER BY price_rub", conn)
 
