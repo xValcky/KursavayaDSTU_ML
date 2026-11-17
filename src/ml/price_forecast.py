@@ -113,15 +113,23 @@ class PriceForecast:
         return float(fc["values"][-1] / self.index_[series].iloc[-1] - 1)
 
 
-def advice(phone_history: pd.DataFrame, tier_change: float | None) -> str | None:
-    """Подсказка «покупать / ждать» для конкретного телефона."""
+def advice(phone_history: pd.DataFrame, tier_change: float | None, current: float | None = None) -> str | None:
+    """Подсказка «покупать / ждать» для конкретного телефона.
+
+    current — цена в каталоге (по ней модель участвует в подборе). Без неё берётся цена последнего дня
+    истории (медиана источников за день): строки одного дня от разных каналов идут в произвольном порядке.
+    """
     if len(phone_history) < 3:
         if tier_change is None:
             return None
         return (f"Цены сегмента за неделю, по прогнозу, {'снизятся' if tier_change < 0 else 'вырастут'} на "
                 f"{abs(tier_change):.0%}." if abs(tier_change) >= 0.01 else "Цены сегмента на неделю — без изменений.")
     prices = phone_history["price_rub"].to_numpy()
-    last, med = prices[-1], np.median(prices)
+    med = np.median(prices)
+    if current is not None and current > 0:
+        last = float(current)
+    else:
+        last = float(phone_history.groupby(phone_history["date"].astype(str).str[:10])["price_rub"].median().iloc[-1])
     if last <= med * 0.97:
         return f"Хорошая цена сейчас: на {1 - last / med:.0%} ниже обычной для этой модели."
     if tier_change is not None and tier_change <= -0.02:

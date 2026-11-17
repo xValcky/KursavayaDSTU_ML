@@ -214,6 +214,9 @@ class MainWindow(QMainWindow):
             sb.setValue(val)
             sb.setSuffix(" ₽")
             sb.setGroupSeparatorShown(True)
+            # значение применяется по Enter / уходу фокуса, а не на каждую цифру: иначе при наборе
+            # «50 000» в «до» промежуточное «5 000» оказывалось ниже «от» и сбрасывало нижнюю границу
+            sb.setKeyboardTracking(False)
         self.budget_min.setSpecialValueText("не важно")  # 0 — нижней границы нет
         self.budget_min.setToolTip("Нижняя граница цены. Дешевле этой цены (−10%) телефоны в подборку не попадут.")
         self.budget.setToolTip("Бюджет — верхняя граница. Допускается превышение до 10%.")
@@ -343,7 +346,10 @@ class MainWindow(QMainWindow):
 
     def answers(self) -> dict:
         a = {k: s.value() for k, s in self.sliders.items()}
-        a.update(budget_rub=float(self.budget.value()), budget_min=float(self.budget_min.value()),
+        for sb in (self.budget_min, self.budget):
+            sb.interpretText()  # применить набранное, даже если фокус ещё в поле
+        lo, hi = sorted((self.budget_min.value(), self.budget.value()))  # вилка всегда «от ≤ до»
+        a.update(budget_rub=float(hi), budget_min=float(lo),
                  os_pref=self.os_pref.currentIndex(),
                  min_rom=int(self.min_rom.currentText()), need_nfc=int(self.need_nfc.isChecked()),
                  esim_pref=self.esim_pref.currentIndex(), ir_pref=self.ir_pref.currentIndex(),
@@ -680,7 +686,8 @@ class MainWindow(QMainWindow):
             return None
         i = np.flatnonzero(self.pipe.phones_["id"].to_numpy() == phone_id)
         tier = TIER_NAMES.get(int(self.pipe.labels_[i[0]])) if len(i) else None
-        text = advice(hist, self.forecast.change(tier) if tier else None)
+        current = float(self.pipe.phones_.iloc[i[0]]["price_rub"]) if len(i) else None
+        text = advice(hist, self.forecast.change(tier) if tier else None, current)
         fair = (self.fair or {}).get(phone_id)
         if fair and len(i):
             diff = self.pipe.phones_.iloc[i[0]]["price_rub"] / fair - 1

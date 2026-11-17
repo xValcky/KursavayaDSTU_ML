@@ -546,23 +546,49 @@ def plot_forecast(canvas: MplCanvas, fc):
     canvas.done()
 
 
-def plot_price_history(canvas: MplCanvas, hist: pd.DataFrame, title: str, fair: float | None = None):
+# постоянные цвета источников: один и тот же источник одного цвета на графике любой модели
+SOURCE_COLORS = {"telegram:ishopper": PALETTE[0], "telegram:polzaskidki": PALETTE[1]}
+SOURCE_TITLES = {"telegram:ishopper": "Telegram: iShopper", "telegram:polzaskidki": "Telegram: polzaSKIDKI"}
+
+
+def _source_color(src: str, k: int) -> str:
+    if src in SOURCE_COLORS:
+        return SOURCE_COLORS[src]
+    if str(src).startswith("оценка"):
+        return MUTED
+    return PALETTE[(k + 4) % len(PALETTE)]  # источники из API — по кругу, без выхода за палитру
+
+
+def plot_price_history(canvas: MplCanvas, hist: pd.DataFrame, title: str, fair: float | None = None,
+                       current: float | None = None):
+    """История цены одной линией по дням (медиана источников за день), точки — по источникам;
+    звезда — цена, по которой модель сейчас стоит в каталоге и участвует в подборе."""
     ax = canvas.clear()
-    if hist.empty:
+    if hist is None or hist.empty:
         ax.text(0.5, 0.5, "Нет истории цен для этой модели", ha="center", va="center", color=MUTED)
         ax.axis("off")
         canvas.done()
         return
-    d = pd.to_datetime(hist["date"])
-    for k, (src, g) in enumerate(hist.assign(d=d).groupby("source")):
-        ax.plot(g["d"], g["price_rub"] / 1000, marker="o", ms=3, lw=1.2, color=PALETTE[k], label=src)
-    ax.axhline(hist["price_rub"].median() / 1000, color=MUTED, ls="--", lw=1, label="обычная цена (медиана)")
+    h = hist.assign(d=pd.to_datetime(hist["date"]), k=hist["price_rub"] / 1000).sort_values("d")
+    daily = h.groupby("d")["k"].median()
+    if len(daily) > 1:
+        ax.plot(daily.index, daily.values, lw=1.6, color=TEXT, alpha=0.55, label="цена по дням", zorder=2)
+    for k, (src, g) in enumerate(h.groupby("source", sort=True)):
+        label = SOURCE_TITLES.get(src, src) if k < 5 else "_nolegend_"  # длинная легенда сплющивает график
+        ax.scatter(g["d"], g["k"], s=22, color=_source_color(src, k), label=label, zorder=3)
+    ax.axhline(h["price_rub"].median() / 1000, color=MUTED, ls="--", lw=1, label="обычная цена (медиана)")
     if fair:
         ax.axhline(fair / 1000, color=PALETTE[2], ls=":", lw=1.5, label="справедливая (модель)")
-    if len(hist) == 1:
-        ax.annotate("в каналах цен не было —\nесть только оценка августа 2026", (d.iloc[0], hist["price_rub"].iloc[0] / 1000),
+    if current:
+        ax.scatter([daily.index[-1]], [current / 1000], marker="*", s=140, color=PALETTE[3], zorder=4,
+                   label=f"в каталоге: {current / 1000:.1f} тыс.")
+    if len(daily) == 1:
+        d0 = daily.index[0]
+        note = ("в каналах цен не было —\nесть только оценка августа 2026"
+                if h["source"].astype(str).str.startswith("оценка").all() else "пока одна точка цены")
+        ax.annotate(note, (d0, daily.iloc[0]),
                     xytext=(0, -28), textcoords="offset points", ha="center", fontsize=8, color=MUTED)
-        ax.set_xlim(d.iloc[0] - pd.Timedelta(days=20), d.iloc[0] + pd.Timedelta(days=20))
+        ax.set_xlim(d0 - pd.Timedelta(days=20), d0 + pd.Timedelta(days=20))
     ax.set_ylabel("тыс. ₽")
     ax.set_title(title, fontsize=10)
     ax.legend(fontsize=7)

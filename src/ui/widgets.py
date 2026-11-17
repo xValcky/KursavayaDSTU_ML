@@ -135,9 +135,18 @@ class Task(QRunnable):
     def run(self):
         try:
             kwargs = {"progress": self.signals.progress.emit} if self.with_progress else {}
-            self.signals.done.emit(self.fn(*self.args, **kwargs))
+            result = self.fn(*self.args, **kwargs)
         except Exception as e:
-            self.signals.error.emit(f"{e}\n\n{traceback.format_exc()}")
+            result, err = None, f"{e}\n\n{traceback.format_exc()}"
+        else:
+            err = None
+        try:
+            if err is None:
+                self.signals.done.emit(result)
+            else:
+                self.signals.error.emit(err)
+        except RuntimeError:  # окно закрыли, пока задача считалась, — результат больше некому отдать
+            pass
 
 
 # ---------- карточка телефона ----------
@@ -281,7 +290,7 @@ class SpecsDialog(QDialog):
         side = QVBoxLayout()
         canvas = charts.MplCanvas(4.5, 2.4)
         charts.plot_price_history(canvas, history if history is not None else pd.DataFrame(),
-                                  "История цены", p.get("fair_price"))
+                                  "История цены", p.get("fair_price"), p.get("price_rub"))
         side.addWidget(canvas, 1)
         if advice_text:
             adv = QLabel(advice_text)
@@ -403,7 +412,7 @@ class SimilarDialog(QDialog):
         if self.history_fn:
             hist = self.history_fn(phone_id)
             charts.plot_price_history(self.history_canvas, hist, f"История цены: {p0['full_name']}",
-                                      p0.get("fair_price"))
+                                      p0.get("fair_price"), p0.get("price_rub"))
             text = self.advice_fn(phone_id, hist) if self.advice_fn else None
             self.advice.setText(text or "")
         clear_layout(self.grid)
